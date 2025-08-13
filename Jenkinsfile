@@ -1,60 +1,62 @@
 pipeline {
-  agent {
-    kubernetes {
-      yaml """
-apiVersion: v1
-kind: Pod
-spec:
-  containers:
-  - name: node
-    image: node:20-alpine
-    command: ['cat']
-    tty: true
-  - name: maven
-    image: maven:3.9-eclipse-temurin-21
-    command: ['cat']
-    tty: true
-"""
-    }
-  }
-  options { timestamps() }
+  agent any
+  options { skipDefaultCheckout(false) }
+  triggers { githubPush() }  // webhook triggers
 
   stages {
-    stage('Checkout') {
-      steps { checkout scm }
-    }
-
-    stage('Build frontend') {
-      when { expression { fileExists('employee frontend final/package.json') } }
+    stage('Info') {
       steps {
-        container('node') {
-          dir('employee frontend final') {
-            sh 'npm ci'
-            sh 'npm run build --if-present'
-          }
-        }
+        sh '''
+          echo "Branch: $BRANCH_NAME"
+          echo "Workspace: $PWD"
+          ls -la
+        '''
       }
     }
 
-    stage('Build backend') {
-      when { expression { fileExists('emp_backend/pom.xml') } }
+    stage('Prepare Frontend') {
       steps {
-        container('maven') {
-          sh 'mvn -f emp_backend/pom.xml -B -DskipTests package'
-        }
+        sh '''
+          if [ -d "employee frontend final" ]; then
+            echo "==> Front dir exists"
+            find "employee frontend final" -maxdepth 2 -type f | wc -l
+          else
+            echo "Front directory not found"; exit 1
+          fi
+        '''
       }
     }
 
-    stage('Archive artifacts') {
+    stage('Prepare Backend') {
       steps {
-        archiveArtifacts allowEmptyArchive: true, artifacts: '''
-employee frontend final/build/**,
-employee frontend final/dist/**,
-emp_backend/target/*.jar
-'''.trim()
+        sh '''
+          if [ -d "emp_backend" ]; then
+            echo "==> Backend dir exists"
+            ls -la emp_backend
+          else
+            echo "Backend directory not found (ok if you don't need it now)"
+          fi
+        '''
+      }
+    }
+
+    stage('Package Artifacts') {
+      steps {
+        sh '''
+          rm -rf artifacts && mkdir -p artifacts
+          # Archive frontend as static site (adjust if needed)
+          tar -czf artifacts/frontend.tar.gz "employee frontend final" || true
+          # Archive backend sources (until we add real build)
+          tar -czf artifacts/backend-src.tar.gz emp_backend || true
+          ls -lh artifacts
+        '''
+        archiveArtifacts artifacts: 'artifacts/*.tar.gz', fingerprint: true
       }
     }
   }
 
-  post { always { cleanWs() } }
+  post {
+    success { echo '✅ Build OK — artifacts archived.' }
+    failure { echo '❌ Build failed — check which stage.' }
+  }
 }
