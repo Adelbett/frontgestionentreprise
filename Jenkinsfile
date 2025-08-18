@@ -8,6 +8,7 @@ metadata:
   labels:
     jenkins: agent
 spec:
+  serviceAccountName: jenkins
   containers:
   - name: node
     image: node:20-bullseye
@@ -17,6 +18,23 @@ spec:
     image: maven:3.9-eclipse-temurin-17
     command: ['cat']
     tty: true
+  - name: kaniko
+    image: gcr.io/kaniko-project/executor:latest
+    command: ['cat']
+    tty: true
+    env:
+    - name: DOCKER_CONFIG
+      value: /kaniko/.docker
+    volumeMounts:
+    - name: docker-config
+      mountPath: /kaniko/.docker
+  volumes:
+  - name: docker-config
+    secret:
+      secretName: regcred
+      items:
+      - key: .dockerconfigjson
+        path: config.json
       """
     }
   }
@@ -24,10 +42,13 @@ spec:
   options { timestamps() }
   triggers { githubPush() } // webhook
 
+  environment {
+    IMAGE = "adelbettaieb/gestionentreprise"   // <-- change si besoin
+    TAG   = "${env.BRANCH_NAME == 'main' ? 'latest' : env.BRANCH_NAME}-${env.BUILD_NUMBER}"
+  }
+
   stages {
-    stage('Checkout') {
-      steps { checkout scm }
-    }
+    stage('Checkout') { steps { checkout scm } }
 
     stage('Build Front') {
       steps {
@@ -60,21 +81,26 @@ spec:
       }
     }
 
-    stage('Package & Archive') {
+    stage('Build & Push Image') {
       steps {
-        sh 'rm -rf artifacts && mkdir -p artifacts'
-        // Front: archive dossier dist si mawjoud
-        sh 'tar -czf artifacts/frontend.tar.gz -C "employee frontend final" dist || true'
-        // Back: copie jar si mawjoud
-        sh 'cp emp_backend/target/*.jar artifacts/backend.jar 2>/dev/null || true'
-        sh 'ls -lh artifacts || true'
-        archiveArtifacts artifacts: 'artifacts/**', fingerprint: true
+        container('kaniko') {
+          sh '''
+            # Si ton Dockerfile n’est pas à la racine, adapte --context et --dockerfile
+            /kaniko/executor \
+              --context "$WORKSPACE" \
+              --dockerfile Dockerfile \
+              --destination docker.io/$IMAGE:$TAG \
+              --destination docker.io/$IMAGE:latest \
+              --snapshotMode=redo \
+              --verbosity=info
+          '''
+        }
       }
     }
   }
 
   post {
-    success { echo '✅ Build OK — artifacts archived (frontend/back).' }
-    failure { echo '❌ Build failed — check the stage in Console Output.' }
+    success { echo '✅ Build OK — image poussée sur Docker Hub.' }
+    failure { echo '❌ Build failed — check Console Output.' }
   }
 }
