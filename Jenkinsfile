@@ -42,10 +42,10 @@ spec:
   }
 
   options { timestamps() }
-  triggers { githubPush() } // webhook
+  triggers { githubPush() }
 
   environment {
-    IMAGE = "adelbettaieb/gestionentreprise"    // change si besoin
+    IMAGE = "adelbettaieb/gestionentreprise"
     TAG   = "${env.BRANCH_NAME == 'main' ? 'latest' : env.BRANCH_NAME}-${env.BUILD_NUMBER}"
   }
 
@@ -87,12 +87,18 @@ spec:
       steps {
         container('kaniko') {
           sh '''
+            # Vérifier que le Dockerfile backend est bien present dans le repo
+            test -f "$WORKSPACE/emp_backend/Dockerfile" || { 
+              echo "Dockerfile introuvable: $WORKSPACE/emp_backend/Dockerfile"; 
+              exit 1; 
+            }
+
             /kaniko/executor \
-              --context "$WORKSPACE" \
+              --context "$WORKSPACE/emp_backend" \
               --dockerfile Dockerfile \
               --destination docker.io/$IMAGE:$TAG \
               --destination docker.io/$IMAGE:latest \
-              --snapshotMode=redo \
+              --snapshot-mode=redo \
               --verbosity=info
           '''
         }
