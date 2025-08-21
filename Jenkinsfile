@@ -9,19 +9,21 @@ metadata:
     jenkins: agent
 spec:
   serviceAccountName: jenkins
+  imagePullSecrets:
+  - name: regcred
   containers:
   - name: node
-    image: node:20-bullseye
+    image: docker.io/library/node:20-bullseye
     command: ['cat']
     tty: true
   - name: maven
-    image: maven:3.9-eclipse-temurin-17
+    image: docker.io/library/maven:3.9-eclipse-temurin-17
     command: ['cat']
     tty: true
   - name: kaniko
-    image: gcr.io/kaniko-project/executor:latest
-    command: ['cat']
-    tty: true
+    image: gcr.io/kaniko-project/executor:debug
+    command: ['/busybox/sh']
+    args: ['-c', 'sleep 9999999']
     env:
     - name: DOCKER_CONFIG
       value: /kaniko/.docker
@@ -35,7 +37,7 @@ spec:
       items:
       - key: .dockerconfigjson
         path: config.json
-      """
+"""
     }
   }
 
@@ -43,7 +45,7 @@ spec:
   triggers { githubPush() } // webhook
 
   environment {
-    IMAGE = "adelbettaieb/gestionentreprise"   // <-- change si besoin
+    IMAGE = "adelbettaieb/gestionentreprise"    // change si besoin
     TAG   = "${env.BRANCH_NAME == 'main' ? 'latest' : env.BRANCH_NAME}-${env.BUILD_NUMBER}"
   }
 
@@ -85,7 +87,6 @@ spec:
       steps {
         container('kaniko') {
           sh '''
-            # Si ton Dockerfile n’est pas à la racine, adapte --context et --dockerfile
             /kaniko/executor \
               --context "$WORKSPACE" \
               --dockerfile Dockerfile \
