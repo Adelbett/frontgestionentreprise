@@ -1,19 +1,13 @@
-# Phase de build
-FROM maven:3.8.7-eclipse-temurin-17 AS builder
+# dans emp_backend/Dockerfile
+FROM maven:3.9-eclipse-temurin-17 AS backend
 WORKDIR /app
 COPY pom.xml .
-RUN mvn dependency:go-offline
-COPY src ./src
-RUN mvn clean package -DskipTests
+RUN mvn -B -q -DskipTests dependency:go-offline
+COPY . .
+RUN mvn -B -DskipTests package
 
-# Phase d'exécution
-FROM openjdk:17-jdk-slim
+FROM eclipse-temurin:17-jre-jammy
 WORKDIR /app
-COPY --from=builder /app/target/*.jar app.jar
+COPY --from=backend /app/target/*.jar /app/app.jar
 EXPOSE 8080
-
-# Ajout d'un utilisateur non-root (optionnel mais recommandé)
-RUN useradd -m springuser
-USER springuser
-
-ENTRYPOINT ["java", "-jar", "/app/app.jar"]
+ENTRYPOINT ["java","-jar","/app/app.jar"]
