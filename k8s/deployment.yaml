@@ -1,0 +1,21 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gestionentreprise
+  labels: { app: gestionentreprise }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: gestionentreprise }
+  template:
+    metadata:
+      labels: { app: gestionentreprise }
+    spec:
+      containers:
+      - name: app
+        image: IMAGE_PLACEHOLDER    # <-- le pipeline remplacera par docker.io/adelbettaieb/gestionentreprise:<tag>
+        ports:
+        - containerPort: 8080       # adapte si ton Spring Boot écoute ailleurs
+        # env:                      # (optionnel) variables DB si besoin
+        # - name: SPRING_DATASOURCE_URL
+        #   value: jdbc:mysql://mysql:3306/xxx

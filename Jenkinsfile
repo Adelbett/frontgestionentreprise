@@ -1,6 +1,7 @@
 pipeline {
   agent {
     kubernetes {
+      defaultContainer 'node'
       yaml """
 apiVersion: v1
 kind: Pod
@@ -30,6 +31,10 @@ spec:
     volumeMounts:
     - name: docker-config
       mountPath: /kaniko/.docker
+  - name: kubectl
+    image: bitnami/kubectl:1.29
+    command: ['sh','-c','sleep 36000']
+    tty: true
   volumes:
   - name: docker-config
     secret:
@@ -41,12 +46,13 @@ spec:
     }
   }
 
-  options { timestamps() }
-  triggers { githubPush() }
+  // pas de triggers {} en Multibranch
+  options { timestamps(); ansiColor('xterm') }
 
   environment {
     IMAGE = "adelbettaieb/gestionentreprise"
     TAG   = "${env.BRANCH_NAME == 'main' ? 'latest' : env.BRANCH_NAME}-${env.BUILD_NUMBER}"
+    K8S_NS = "jenkins" // simple: on déploie dans le même namespace
   }
 
   stages {
@@ -87,10 +93,8 @@ spec:
       steps {
         container('kaniko') {
           sh '''
-            # Vérifier que le Dockerfile backend est bien present dans le repo
-            test -f "$WORKSPACE/emp_backend/Dockerfile" || { 
-              echo "Dockerfile introuvable: $WORKSPACE/emp_backend/Dockerfile"; 
-              exit 1; 
+            test -f "$WORKSPACE/emp_backend/Dockerfile" || {
+              echo "Dockerfile introuvable: $WORKSPACE/emp_backend/Dockerfile"; exit 1;
             }
 
             /kaniko/executor \
@@ -98,8 +102,22 @@ spec:
               --dockerfile Dockerfile \
               --destination docker.io/$IMAGE:$TAG \
               --destination docker.io/$IMAGE:latest \
-              --snapshot-mode=redo \
-              --verbosity=info
+              --snapshot-mode=redo --verbosity=info
+          '''
+        }
+      }
+    }
+
+    stage('Deploy to Minikube') {
+      when { branch 'main' }
+      steps {
+        container('kubectl') {
+          sh '''
+            # Manifests "k8s/" dans le repo (exemples ci-dessous)
+            # Remplacement de l'image par la nouvelle taguée
+            sed "s|IMAGE_PLACEHOLDER|docker.io/$IMAGE:$TAG|g" k8s/deployment.yaml | kubectl -n $K8S_NS apply -f -
+            kubectl -n $K8S_NS apply -f k8s/service.yaml
+            kubectl -n $K8S_NS rollout status deploy/gestionentreprise
           '''
         }
       }
@@ -107,7 +125,7 @@ spec:
   }
 
   post {
-    success { echo '✅ Build OK — image poussée sur Docker Hub.' }
-    failure { echo '❌ Build failed — check Console Output.' }
+    success { echo '✅ Build & Deploy OK' }
+    failure { echo '❌ Echec — voir Console Output' }
   }
 }
