@@ -119,11 +119,21 @@ spec:
     K8S_NS       = 'jenkins'
     APP_NAME     = 'gestionentreprise'
     INGRESS_HOST = 'app.local'
-    // Tag 'main' as latest, others as branch-BUILD
-    TAG = (env.BRANCH_NAME == 'main') ? 'latest' : "${env.BRANCH_NAME}-${env.BUILD_NUMBER}"
+    // TAG must be set later in a script step (Declarative env does not allow ternary)
+    TAG = ''
   }
 
   stages {
+
+    // Set dynamic vars that cannot be expressed in 'environment { }'
+    stage('Init vars') {
+      steps {
+        script {
+          env.TAG = (env.BRANCH_NAME == 'main') ? 'latest' : "${env.BRANCH_NAME}-${env.BUILD_NUMBER}"
+          echo "Using image tag: ${env.TAG}"
+        }
+      }
+    }
 
     stage('Checkout') {
       steps { checkout scm }
