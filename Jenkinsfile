@@ -31,8 +31,8 @@ spec:
   - name: kaniko                     # Kaniko executor builds & pushes Docker image
     image: gcr.io/kaniko-project/executor:v1.23.2-debug
     imagePullPolicy: IfNotPresent
-    command: ['/busybox/sh']
-    args: ['-c', 'sleep 99d']        # sleep; Jenkins will exec commands inside
+    command: ['/bin/sh','-c']        # ensure a POSIX shell exists for 'sh' steps
+    args: ['sleep 99d']              # sleep; Jenkins will exec commands inside
     env:
     - name: DOCKER_CONFIG
       value: /kaniko/.docker         # where Docker Hub creds are mounted
@@ -41,10 +41,10 @@ spec:
       mountPath: /kaniko/.docker     # mount regcred as docker config
 
   - name: kubectl                    # kubectl for apply/rollout/smoke tests
-    image: bitnami/kubectl:1.29
+    image: bitnami/kubectl:1.29-debian-12  # <-- Debian variant includes /bin/sh
     imagePullPolicy: IfNotPresent
-    command: ['sleep']
-    args: ['99d']
+    command: ['/bin/sh','-c']        # run a real shell so 'sh' steps work
+    args: ['sleep 99d']
 
   volumes:
   - name: docker-config
@@ -60,11 +60,11 @@ spec:
   }
 
   options {
-    timestamps()                     // nice logs
+    timestamps()                     // readable logs
     buildDiscarder(logRotator(numToKeepStr: '20')) // keep last 20 builds
   }
 
-  // GitHub webhook trigger (Multibranch handles indexing; this catches pushes)
+  // GitHub webhook trigger (Multibranch also handles indexing)
   triggers { githubPush() }
 
   environment {
@@ -111,7 +111,7 @@ spec:
             sh '''
               echo "==> Frontend: install & build"
               npm ci || npm install                    # prefer clean install; fallback
-              npm run build || true                    # run build (adapt if using Angular)
+              npm run build || true                    # run build (adapt if Angular)
             '''
           }
         }
@@ -185,9 +185,11 @@ spec:
       steps {
         container('kubectl') {
           sh '''
-            echo "==> Smoke test via Ingress"
-            IP=$(kubectl -n kube-system get cm kubeadm-config -o jsonpath='{.data.ClusterConfiguration}' >/dev/null 2>&1; echo "") # noop just to ensure kubectl works
-            curl -fsSI -H "Host: $INGRESS_HOST" "http://$(minikube ip)/" | head -n 1
+            echo "==> Smoke test via Ingress service (in-cluster)"
+            # Use a short-lived curl pod to hit the ingress controller service
+            kubectl -n "$K8S_NS" run smoke --rm -i --restart=Never --image=curlimages/curl -- \
+              -sSI -H "Host: $INGRESS_HOST" \
+              http://ingress-nginx-controller.ingress-nginx.svc.cluster.local/ | head -n1
           '''
         }
       }
