@@ -1,7 +1,8 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: gestionentreprise
+  name: gestionentreprise           # name of your app
+  namespace: jenkins                # we deploy in 'jenkins' ns
   labels: { app: gestionentreprise }
 spec:
   replicas: 1
@@ -11,11 +12,21 @@ spec:
     metadata:
       labels: { app: gestionentreprise }
     spec:
+      # imagePullSecrets:             # uncomment if your image is private
+      # - name: regcred
       containers:
       - name: app
-        image: IMAGE_PLACEHOLDER    # <-- le pipeline remplacera par docker.io/adelbettaieb/gestionentreprise:<tag>
+        image: docker.io/adelbettaieb/gestionentreprise:latest  # Jenkins overwrites tag
         ports:
-        - containerPort: 8080       # adapte si ton Spring Boot écoute ailleurs
-        # env:                      # (optionnel) variables DB si besoin
-        # - name: SPRING_DATASOURCE_URL
-        #   value: jdbc:mysql://mysql:3306/xxx
+        - containerPort: 8080          # expose your backend port
+        resources:
+          requests: { cpu: "200m", memory: "256Mi" }
+          limits:   { cpu: "1",    memory: "512Mi" }
+        readinessProbe:
+          httpGet: { path: /actuator/health, port: 8080 }       # adapt if different
+          initialDelaySeconds: 20
+          periodSeconds: 10
+        livenessProbe:
+          httpGet: { path: /actuator/health, port: 8080 }       # adapt if different
+          initialDelaySeconds: 30
+          periodSeconds: 10
