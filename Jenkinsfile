@@ -3,7 +3,7 @@
 // =======================
 pipeline {
 
-  // Build inside a Kubernetes agent pod
+  // Exécuter dans un Pod Kubernetes (plugin Kubernetes)
   agent {
     kubernetes {
       yaml """
@@ -15,82 +15,81 @@ metadata:
 spec:
   serviceAccountName: jenkins
   imagePullSecrets:
-  - name: regcred
+    - name: regcred
 
-  # Workspace partagé accessible en écriture
+  # Workspace partagé accessible à tous les containers
   securityContext:
     fsGroup: 1000
 
+  # Donne les droits sur /home/jenkins/agent
   initContainers:
-  - name: init-perms
-    image: busybox:1.36
-    command: ["sh","-c"]
-    args: ["mkdir -p /home/jenkins/agent && chmod 0777 /home/jenkins/agent"]
-    volumeMounts:
-    - name: workspace-volume
-      mountPath: /home/jenkins/agent
+    - name: init-perms
+      image: busybox:1.36
+      command: ["sh","-c"]
+      args: ["mkdir -p /home/jenkins/agent && chmod 0777 /home/jenkins/agent"]
+      volumeMounts:
+        - name: workspace-volume
+          mountPath: /home/jenkins/agent
 
   containers:
-  - name: node
-    image: docker.io/library/node:20-bullseye
-    imagePullPolicy: IfNotPresent
-    command: ["cat"]
-    tty: true
-    workingDir: /home/jenkins/agent
-    volumeMounts:
-    - name: workspace-volume
-      mountPath: /home/jenkins/agent
+    - name: node
+      image: docker.io/library/node:20-bullseye
+      imagePullPolicy: IfNotPresent
+      command: ["cat"]
+      tty: true
+      workingDir: /home/jenkins/agent
+      volumeMounts:
+        - name: workspace-volume
+          mountPath: /home/jenkins/agent
 
-  - name: maven
-    image: docker.io/library/maven:3.9-eclipse-temurin-17
-    imagePullPolicy: IfNotPresent
-    command: ["cat"]
-    tty: true
-    workingDir: /home/jenkins/agent
-    volumeMounts:
-    - name: workspace-volume
-      mountPath: /home/jenkins/agent
+    - name: maven
+      image: docker.io/library/maven:3.9-eclipse-temurin-17
+      imagePullPolicy: IfNotPresent
+      command: ["cat"]
+      tty: true
+      workingDir: /home/jenkins/agent
+      volumeMounts:
+        - name: workspace-volume
+          mountPath: /home/jenkins/agent
 
-  - name: kaniko
-    image: gcr.io/kaniko-project/executor:v1.23.2-debug
-    imagePullPolicy: IfNotPresent
-    command: ["/bin/sh","-c"]
-    args: ["sleep 99d"]
-    tty: true
-    workingDir: /home/jenkins/agent
-    env:
-    - name: DOCKER_CONFIG
-      value: /kaniko/.docker
-    volumeMounts:
-    - name: docker-config
-      mountPath: /kaniko/.docker
-    - name: workspace-volume
-      mountPath: /home/jenkins/agent
+    - name: kaniko
+      image: gcr.io/kaniko-project/executor:v1.23.2-debug
+      imagePullPolicy: IfNotPresent
+      command: ["/busybox/cat"]   # le plus fiable pour exec/attach
+      tty: true
+      workingDir: /home/jenkins/agent
+      env:
+        - name: DOCKER_CONFIG
+          value: /kaniko/.docker
+      volumeMounts:
+        - name: docker-config
+          mountPath: /kaniko/.docker
+        - name: workspace-volume
+          mountPath: /home/jenkins/agent
 
-  - name: kubectl
-    image: bitnami/kubectl:1.29-debian-12
-    imagePullPolicy: IfNotPresent
-    command: ["/bin/sh","-c"]
-    args: ["sleep 99d"]
-    tty: true
-    workingDir: /home/jenkins/agent
-    volumeMounts:
-    - name: workspace-volume
-      mountPath: /home/jenkins/agent
+    - name: kubectl
+      image: bitnami/kubectl:1.29-debian-12
+      imagePullPolicy: IfNotPresent
+      command: ["cat"]            # le plus fiable pour exec/attach
+      tty: true
+      workingDir: /home/jenkins/agent
+      volumeMounts:
+        - name: workspace-volume
+          mountPath: /home/jenkins/agent
 
   volumes:
-  - name: docker-config
-    secret:
-      secretName: regcred
-      items:
-      - key: .dockerconfigjson
-        path: config.json
+    - name: docker-config
+      secret:
+        secretName: regcred
+        items:
+          - key: .dockerconfigjson
+            path: config.json
 
-  - name: workspace-volume
-    emptyDir: {}
+    - name: workspace-volume
+      emptyDir: {}
 """
       defaultContainer 'kubectl'
-      // cloud 'kubernetes' // décommente seulement si ton Cloud porte un autre nom
+      // cloud 'kubernetes' // décommente seulement si ton Cloud a un autre nom
     }
   }
 
@@ -100,6 +99,7 @@ spec:
     skipDefaultCheckout(true)   // évite le double "Declarative: Checkout SCM"
   }
 
+  // Utile mais facultatif en Multibranch
   triggers { githubPush() }
 
   environment {
@@ -107,18 +107,16 @@ spec:
     K8S_NS       = 'jenkins'
     APP_NAME     = 'gestionentreprise'
     INGRESS_HOST = 'app.local'
-    // (TAG est calculé dynamiquement dans "Init vars")
+    // TAG sera défini dans le stage "Init vars"
   }
 
   stages {
 
-    // --- IMPORTANT: calcule et exporte TAG ---
     stage('Init vars') {
       steps {
         script {
-          def b = env.BRANCH_NAME ?: 'main'
-          env.TAG = (b == 'main') ? 'latest' : "${b}-${env.BUILD_NUMBER}"
-          echo "Using image tag: ${env.TAG} (branch=${b})"
+          env.TAG = (env.BRANCH_NAME == 'main') ? 'latest' : "${env.BRANCH_NAME}-${env.BUILD_NUMBER}"
+          echo "Using image tag: ${env.TAG} (branch=${env.BRANCH_NAME})"
         }
       }
     }
@@ -127,11 +125,11 @@ spec:
       steps { checkout scm }
     }
 
-    // Sanity rapide: vérifier que 'sh' démarre bien
+    // Petit test pour valider exec/attach
     stage('Sanity sh') {
       steps {
         container('kubectl') {
-          sh 'echo OK; whoami || true; pwd; ls -la'
+          sh 'echo OK && whoami || id && pwd && ls -la'
         }
       }
     }
@@ -147,7 +145,7 @@ spec:
     stage('Build Frontend') {
       steps {
         container('node') {
-          dir('employee frontend final') {        // <- adapte ce nom si besoin
+          dir('employee frontend final') {   // <-- adapte si ton dossier frontend diffère
             sh '''
               echo "==> Frontend build"
               npm ci || npm install
@@ -161,7 +159,7 @@ spec:
     stage('Build Backend (Maven)') {
       steps {
         container('maven') {
-          dir('emp_backend') {                     // <- ton dossier backend
+          dir('emp_backend') {               // <-- dossier backend
             sh '''
               echo "==> Backend package (skip tests)"
               if [ -x ./mvnw ]; then
@@ -190,7 +188,7 @@ spec:
               --destination "docker.io/$DOCKER_IMAGE:$TAG" \
               --snapshot-mode=redo --verbosity=info
 
-            if [ "$BRANCH_NAME" = "main" ]; then
+            if [ "$BRANCH_NAME" = "main" ] && [ "$TAG" != "latest" ]; then
               echo "==> Also push :latest"
               /kaniko/executor \
                 --context "$WORKSPACE/emp_backend" \
