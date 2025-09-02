@@ -3,6 +3,7 @@
 // =======================
 pipeline {
 
+  // Build inside a Kubernetes agent pod
   agent {
     kubernetes {
       yaml """
@@ -16,7 +17,7 @@ spec:
   imagePullSecrets:
   - name: regcred
 
-  # make shared workspace writeable by all containers
+  # Workspace partagé accessible en écriture
   securityContext:
     fsGroup: 1000
 
@@ -30,18 +31,16 @@ spec:
       mountPath: /home/jenkins/agent
 
   containers:
-  # NodeJS for frontend
   - name: node
     image: docker.io/library/node:20-bullseye
     imagePullPolicy: IfNotPresent
-    command: ["cat"]                 # keep idle; Jenkins will exec into it
+    command: ["cat"]
     tty: true
     workingDir: /home/jenkins/agent
     volumeMounts:
     - name: workspace-volume
       mountPath: /home/jenkins/agent
 
-  # Maven for backend
   - name: maven
     image: docker.io/library/maven:3.9-eclipse-temurin-17
     imagePullPolicy: IfNotPresent
@@ -52,7 +51,6 @@ spec:
     - name: workspace-volume
       mountPath: /home/jenkins/agent
 
-  # Kaniko for image build/push (needs /bin/sh in image)
   - name: kaniko
     image: gcr.io/kaniko-project/executor:v1.23.2-debug
     imagePullPolicy: IfNotPresent
@@ -69,11 +67,11 @@ spec:
     - name: workspace-volume
       mountPath: /home/jenkins/agent
 
-  # kubectl for apply/rollout/smoke tests
   - name: kubectl
-    image: bitnami/kubectl:1.29-debian-12  # has /bin/sh
+    image: bitnami/kubectl:1.29-debian-12
     imagePullPolicy: IfNotPresent
-    command: ["cat"]                       # <- use cat+tty (more reliable for exec)
+    command: ["/bin/sh","-c"]
+    args: ["sleep 99d"]
     tty: true
     workingDir: /home/jenkins/agent
     volumeMounts:
@@ -91,15 +89,15 @@ spec:
   - name: workspace-volume
     emptyDir: {}
 """
-      defaultContainer 'kubectl'   // bare 'sh' runs in kubectl container
-      // cloud 'kubernetes'        // uncomment only if your cloud has another name
+      defaultContainer 'kubectl'
+      // cloud 'kubernetes' // décommente seulement si ton Cloud porte un autre nom
     }
   }
 
   options {
     timestamps()
     buildDiscarder(logRotator(numToKeepStr: '20'))
-    skipDefaultCheckout(true)
+    skipDefaultCheckout(true)   // évite le double "Declarative: Checkout SCM"
   }
 
   triggers { githubPush() }
@@ -109,18 +107,18 @@ spec:
     K8S_NS       = 'jenkins'
     APP_NAME     = 'gestionentreprise'
     INGRESS_HOST = 'app.local'
-    TAG          = ''   // set in Init vars
+    // (TAG est calculé dynamiquement dans "Init vars")
   }
 
   stages {
 
+    // --- IMPORTANT: calcule et exporte TAG ---
     stage('Init vars') {
       steps {
         script {
-          // Robust: fall back if BRANCH_NAME is not set yet
-          def branch = (env.BRANCH_NAME ?: 'main').trim()
-          env.TAG = (branch == 'main') ? 'latest' : "${branch}-${env.BUILD_NUMBER}"
-          echo "Using image tag: ${env.TAG} (branch=${branch})"
+          def b = env.BRANCH_NAME ?: 'main'
+          env.TAG = (b == 'main') ? 'latest' : "${b}-${env.BUILD_NUMBER}"
+          echo "Using image tag: ${env.TAG} (branch=${b})"
         }
       }
     }
@@ -129,11 +127,11 @@ spec:
       steps { checkout scm }
     }
 
-    // quick check the container exec works
+    // Sanity rapide: vérifier que 'sh' démarre bien
     stage('Sanity sh') {
       steps {
         container('kubectl') {
-          sh 'echo OK && whoami && pwd && ls -la'
+          sh 'echo OK; whoami || true; pwd; ls -la'
         }
       }
     }
@@ -149,8 +147,7 @@ spec:
     stage('Build Frontend') {
       steps {
         container('node') {
-          // TODO: change this folder name if your repo uses a different one
-          dir('employee frontend final') {
+          dir('employee frontend final') {        // <- adapte ce nom si besoin
             sh '''
               echo "==> Frontend build"
               npm ci || npm install
@@ -164,7 +161,7 @@ spec:
     stage('Build Backend (Maven)') {
       steps {
         container('maven') {
-          dir('emp_backend') {
+          dir('emp_backend') {                     // <- ton dossier backend
             sh '''
               echo "==> Backend package (skip tests)"
               if [ -x ./mvnw ]; then
@@ -228,7 +225,7 @@ spec:
       steps {
         container('kubectl') {
           sh '''
-            echo "==> Smoke test (in-cluster via ingress svc)"
+            echo "==> Smoke test (in-cluster)"
             kubectl -n "$K8S_NS" run smoke --rm -i --restart=Never --image=curlimages/curl -- \
               -sSI -H "Host: $INGRESS_HOST" \
               http://ingress-nginx-controller.ingress-nginx.svc.cluster.local/ | head -n1
