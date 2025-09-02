@@ -4,7 +4,6 @@
 
 
 
-**Technology Stack:**
 
 *Backend:*
 - **Spring Boot:** The backend of the Employee Management System is built using Spring Boot, a Java-based framework known for its simplicity and ease of use. Spring Boot provides a robust and scalable foundation for developing enterprise-level applications.
