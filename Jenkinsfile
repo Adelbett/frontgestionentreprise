@@ -3,10 +3,8 @@
 // =======================
 pipeline {
 
-  // Run this pipeline inside a Kubernetes agent pod (via Kubernetes plugin)
   agent {
     kubernetes {
-      // Inline Pod YAML: defines build containers + shared workspace volume
       yaml """
 apiVersion: v1
 kind: Pod
@@ -18,11 +16,10 @@ spec:
   imagePullSecrets:
   - name: regcred
 
-  # Make the shared workspace under /home/jenkins/agent writable to all
+  # make shared workspace writeable by all containers
   securityContext:
     fsGroup: 1000
 
-  # Ensure the workspace path exists and is wide-open for all containers
   initContainers:
   - name: init-perms
     image: busybox:1.36
@@ -33,18 +30,18 @@ spec:
       mountPath: /home/jenkins/agent
 
   containers:
-  # NodeJS for frontend build
+  # NodeJS for frontend
   - name: node
     image: docker.io/library/node:20-bullseye
     imagePullPolicy: IfNotPresent
-    command: ["cat"]                 # keep container idle; Jenkins will exec into it
+    command: ["cat"]                 # keep idle; Jenkins will exec into it
     tty: true
     workingDir: /home/jenkins/agent
     volumeMounts:
     - name: workspace-volume
       mountPath: /home/jenkins/agent
 
-  # Maven for backend build
+  # Maven for backend
   - name: maven
     image: docker.io/library/maven:3.9-eclipse-temurin-17
     imagePullPolicy: IfNotPresent
@@ -55,11 +52,11 @@ spec:
     - name: workspace-volume
       mountPath: /home/jenkins/agent
 
-  # Kaniko to build & push the Docker image (uses Docker Hub creds from regcred)
+  # Kaniko for image build/push (needs /bin/sh in image)
   - name: kaniko
     image: gcr.io/kaniko-project/executor:v1.23.2-debug
     imagePullPolicy: IfNotPresent
-    command: ["/bin/sh","-c"]        # real shell so 'sh' steps work
+    command: ["/bin/sh","-c"]
     args: ["sleep 99d"]
     tty: true
     workingDir: /home/jenkins/agent
@@ -74,10 +71,9 @@ spec:
 
   # kubectl for apply/rollout/smoke tests
   - name: kubectl
-    image: bitnami/kubectl:1.29-debian-12   # Debian variant includes /bin/sh
+    image: bitnami/kubectl:1.29-debian-12  # has /bin/sh
     imagePullPolicy: IfNotPresent
-    command: ["/bin/sh","-c"]
-    args: ["sleep 99d"]
+    command: ["cat"]                       # <- use cat+tty (more reliable for exec)
     tty: true
     workingDir: /home/jenkins/agent
     volumeMounts:
@@ -95,42 +91,36 @@ spec:
   - name: workspace-volume
     emptyDir: {}
 """
-      // Make kubectl the default container for bare 'sh' steps
-      defaultContainer 'kubectl'
-      // If your Cloud name in Jenkins is not "kubernetes", uncomment and set it:
-      // cloud 'kubernetes'
+      defaultContainer 'kubectl'   // bare 'sh' runs in kubectl container
+      // cloud 'kubernetes'        // uncomment only if your cloud has another name
     }
   }
 
   options {
     timestamps()
     buildDiscarder(logRotator(numToKeepStr: '20'))
-    // Avoid the extra automatic "Declarative: Checkout SCM" (we do our own)
     skipDefaultCheckout(true)
   }
 
-  // Build on push (Multibranch will also index PRs/branches)
   triggers { githubPush() }
 
   environment {
-    // Docker image coordinates
     DOCKER_IMAGE = 'adelbettaieb/gestionentreprise'
-    // Kubernetes settings
     K8S_NS       = 'jenkins'
     APP_NAME     = 'gestionentreprise'
     INGRESS_HOST = 'app.local'
-    // TAG must be set later in a script step (Declarative env does not allow ternary)
-    TAG = ''
+    TAG          = ''   // set in Init vars
   }
 
   stages {
 
-    // Set dynamic vars that cannot be expressed in 'environment { }'
     stage('Init vars') {
       steps {
         script {
-          env.TAG = (env.BRANCH_NAME == 'main') ? 'latest' : "${env.BRANCH_NAME}-${env.BUILD_NUMBER}"
-          echo "Using image tag: ${env.TAG}"
+          // Robust: fall back if BRANCH_NAME is not set yet
+          def branch = (env.BRANCH_NAME ?: 'main').trim()
+          env.TAG = (branch == 'main') ? 'latest' : "${branch}-${env.BUILD_NUMBER}"
+          echo "Using image tag: ${env.TAG} (branch=${branch})"
         }
       }
     }
@@ -139,16 +129,11 @@ spec:
       steps { checkout scm }
     }
 
-    // Quick sanity check that 'sh' runs fine in the default (kubectl) container
+    // quick check the container exec works
     stage('Sanity sh') {
       steps {
         container('kubectl') {
-          sh '''
-            echo "OK"
-            whoami
-            pwd
-            ls -la
-          '''
+          sh 'echo OK && whoami && pwd && ls -la'
         }
       }
     }
@@ -164,7 +149,7 @@ spec:
     stage('Build Frontend') {
       steps {
         container('node') {
-          // TODO: change this path if your frontend folder has a different name
+          // TODO: change this folder name if your repo uses a different one
           dir('employee frontend final') {
             sh '''
               echo "==> Frontend build"
