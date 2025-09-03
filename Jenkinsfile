@@ -17,6 +17,7 @@ spec:
   imagePullSecrets:
   - name: regcred
 
+  # Workspace partagé accessible en écriture
   securityContext:
     fsGroup: 1000
 
@@ -33,7 +34,7 @@ spec:
   - name: node
     image: docker.io/library/node:20-bullseye
     imagePullPolicy: IfNotPresent
-    command: ["cat"]
+    command: ["cat"]                 # keep-alive
     tty: true
     workingDir: /home/jenkins/agent
     volumeMounts:
@@ -43,7 +44,7 @@ spec:
   - name: maven
     image: docker.io/library/maven:3.9-eclipse-temurin-17
     imagePullPolicy: IfNotPresent
-    command: ["cat"]
+    command: ["cat"]                 # keep-alive
     tty: true
     workingDir: /home/jenkins/agent
     volumeMounts:
@@ -53,8 +54,7 @@ spec:
   - name: kaniko
     image: gcr.io/kaniko-project/executor:v1.23.2-debug
     imagePullPolicy: IfNotPresent
-    command: ["/busybox/sh","-c"]
-    args: ["sleep 99d"]
+    command: ["cat"]                 # ✅ keep-alive fiable
     tty: true
     env:
     - name: DOCKER_CONFIG
@@ -69,11 +69,11 @@ spec:
   - name: kubectl
     image: bitnami/kubectl:1.29-debian-12
     imagePullPolicy: IfNotPresent
-    command: ["/bin/sh","-c"]
+    command: ["/bin/sh","-c"]        # keep-alive
     args: ["sleep 99d"]
     tty: true
     securityContext:
-      runAsUser: 0
+      runAsUser: 0                   # évite soucis d’exec/permissions
     workingDir: /home/jenkins/agent
     volumeMounts:
     - name: workspace-volume
@@ -91,14 +91,14 @@ spec:
     emptyDir: {}
 """
       defaultContainer 'kubectl'
-      // cloud 'kubernetes' // décommente si ton Cloud a un autre nom
+      // cloud 'kubernetes'  // décommente seulement si ton Cloud a un autre nom dans Jenkins
     }
   }
 
   options {
     timestamps()
     buildDiscarder(logRotator(numToKeepStr: '20'))
-    skipDefaultCheckout(true)   // évite le double checkout
+    skipDefaultCheckout(true)   // évite le double "Declarative: Checkout SCM"
   }
 
   triggers { githubPush() }
@@ -149,7 +149,7 @@ spec:
     stage('Build Frontend') {
       steps {
         container('node') {
-          dir('employee frontend final') { // renomme si besoin
+          dir('employee frontend final') { // 🔁 renomme si ton dossier diffère
             sh '''
               set -eux
               npm ci || npm install
