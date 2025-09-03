@@ -17,7 +17,6 @@ spec:
   imagePullSecrets:
   - name: regcred
 
-  # Workspace partagé accessible en écriture
   securityContext:
     fsGroup: 1000
 
@@ -34,7 +33,7 @@ spec:
   - name: node
     image: docker.io/library/node:20-bullseye
     imagePullPolicy: IfNotPresent
-    command: ["cat"]                  # conteneur vivant
+    command: ["cat"]
     tty: true
     workingDir: /home/jenkins/agent
     volumeMounts:
@@ -54,7 +53,6 @@ spec:
   - name: kaniko
     image: gcr.io/kaniko-project/executor:v1.23.2-debug
     imagePullPolicy: IfNotPresent
-    # keep-alive + shell dispo pour les 'sh' Jenkins
     command: ["/busybox/sh","-c"]
     args: ["sleep 99d"]
     tty: true
@@ -71,11 +69,11 @@ spec:
   - name: kubectl
     image: bitnami/kubectl:1.29-debian-12
     imagePullPolicy: IfNotPresent
-    command: ["/bin/sh","-c"]         # conteneur vivant
+    command: ["/bin/sh","-c"]
     args: ["sleep 99d"]
     tty: true
     securityContext:
-      runAsUser: 0                    # évite soucis d’exec/permissions
+      runAsUser: 0
     workingDir: /home/jenkins/agent
     volumeMounts:
     - name: workspace-volume
@@ -93,14 +91,14 @@ spec:
     emptyDir: {}
 """
       defaultContainer 'kubectl'
-      // cloud 'kubernetes'  // décommente seulement si ton Cloud a un autre nom dans Jenkins
+      // cloud 'kubernetes' // décommente si ton Cloud a un autre nom
     }
   }
 
   options {
     timestamps()
     buildDiscarder(logRotator(numToKeepStr: '20'))
-    skipDefaultCheckout(true)   // évite le double "Declarative: Checkout SCM"
+    skipDefaultCheckout(true)   // évite le double checkout
   }
 
   triggers { githubPush() }
@@ -114,20 +112,24 @@ spec:
 
   stages {
 
-    stage('Init vars') {
-      steps {
-        script {
-          env.TAG = (env.BRANCH_NAME == 'main') ? 'latest' : "${env.BRANCH_NAME}-${env.BUILD_NUMBER}"
-          echo "Using image tag: ${env.TAG} (branch=${env.BRANCH_NAME})"
-        }
-      }
-    }
-
     stage('Checkout') {
       steps { checkout scm }
     }
 
-    // Petit test pour valider que 'sh' démarre bien
+    stage('Init vars') {
+      steps {
+        script {
+          def branch      = (env.BRANCH_NAME ?: 'main')
+          def safeBranch  = branch.toLowerCase().replaceAll(/[^a-z0-9._-]/, '-')
+          env.SAFE_BRANCH = safeBranch
+          env.SHORT_SHA   = (env.GIT_COMMIT ? env.GIT_COMMIT.take(7) : '')
+          env.TAG         = (safeBranch == 'main') ? 'latest' : "${safeBranch}-${env.BUILD_NUMBER}"
+          echo "Docker image => docker.io/${env.DOCKER_IMAGE}:${env.TAG}"
+          if (env.SHORT_SHA) { echo "SHORT_SHA=${env.SHORT_SHA}" }
+        }
+      }
+    }
+
     stage('Sanity sh') {
       steps {
         container('kubectl') {
@@ -147,7 +149,7 @@ spec:
     stage('Build Frontend') {
       steps {
         container('node') {
-          dir('employee frontend final') {  // <-- renomme si ton dossier diffère
+          dir('employee frontend final') { // renomme si besoin
             sh '''
               set -eux
               npm ci || npm install
@@ -175,41 +177,47 @@ spec:
       }
     }
 
-stage('Build & Push Image (Kaniko)') {
-  environment {
-    DOCKER_IMAGE = 'adelbettaieb/gestionentreprise'
-    CONTEXT_DIR  = "${WORKSPACE}/emp_backend"
-    DOCKERFILE   = "${WORKSPACE}/emp_backend/Dockerfile"
-  }
-  steps {
-    container('kaniko') {
-      sh '''
-        set -euxo pipefail
+    stage('Build & Push Image (Kaniko)') {
+      steps {
+        container('kaniko') {
+          sh '''
+            set -euo pipefail
 
-        # Le Dockerfile doit exister
-        test -f "$DOCKERFILE"
+            CONTEXT_DIR="$WORKSPACE/emp_backend"
+            DOCKERFILE="$CONTEXT_DIR/Dockerfile"
 
-        # Build + push avec 2 tags: commit et nom de branche
-        /kaniko/executor \
-          --context "$CONTEXT_DIR" \
-          --dockerfile "$DOCKERFILE" \
-          --destination "docker.io/$DOCKER_IMAGE:$GIT_COMMIT" \
-          --destination "docker.io/$DOCKER_IMAGE:$BRANCH_NAME" \
-          --snapshot-mode=redo --verbosity=info
+            test -d "$CONTEXT_DIR"
+            test -f "$DOCKERFILE"
 
-        # Si on est sur main, pousser aussi :latest
-        if [ "$BRANCH_NAME" = "main" ]; then
-          /kaniko/executor \
-            --context "$CONTEXT_DIR" \
-            --dockerfile "$DOCKERFILE" \
-            --destination "docker.io/$DOCKER_IMAGE:latest" \
-            --snapshot-mode=redo --verbosity=info
-        fi
-      '''
+            echo ">> Build & push docker.io/$DOCKER_IMAGE:$TAG"
+            /kaniko/executor \
+              --context "$CONTEXT_DIR" \
+              --dockerfile "$DOCKERFILE" \
+              --destination "docker.io/$DOCKER_IMAGE:$TAG" \
+              --snapshot-mode=redo --verbosity=info
+
+            # Tags additionnels (facultatifs)
+            if [ -n "${SAFE_BRANCH:-}" ] && [ "$SAFE_BRANCH" != "main" ]; then
+              echo ">> Also tag branch: $SAFE_BRANCH"
+              /kaniko/executor \
+                --context "$CONTEXT_DIR" \
+                --dockerfile "$DOCKERFILE" \
+                --destination "docker.io/$DOCKER_IMAGE:$SAFE_BRANCH" \
+                --snapshot-mode=redo --verbosity=info
+            fi
+
+            if [ -n "${SHORT_SHA:-}" ]; then
+              echo ">> Also tag commit: $SHORT_SHA"
+              /kaniko/executor \
+                --context "$CONTEXT_DIR" \
+                --dockerfile "$DOCKERFILE" \
+                --destination "docker.io/$DOCKER_IMAGE:$SHORT_SHA" \
+                --snapshot-mode=redo --verbosity=info
+            fi
+          '''
+        }
+      }
     }
-  }
-}
-
 
     stage('Deploy to Kubernetes') {
       steps {
