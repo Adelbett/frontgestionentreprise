@@ -7,6 +7,8 @@ ARG JAR=emp_backend-0.0.1-SNAPSHOT.jar
 COPY target/${JAR} /app/app.jar
 
 EXPOSE 8080
-# Optionnel: passe des flags JVM via JAVA_OPTS
+# Options JVM éventuelles
 ENV JAVA_OPTS=""
-ENTRYPOINT ["sh","-c","java $JAVA_OPTS -jar /app/app.jar"]
+
+# IMPORTANT: 'exec' pour que Java soit PID 1 (signaux/probes OK)
+ENTRYPOINT ["sh","-c","exec java $JAVA_OPTS -jar /app/app.jar"]

@@ -1,6 +1,105 @@
-﻿# ---------------------------
-# Deployment
-# ---------------------------
+﻿# =========================
+# 1) Secret pour MySQL
+# =========================
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mysql-secret
+  namespace: jenkins
+type: Opaque
+stringData:
+  MYSQL_ROOT_PASSWORD: rootpass123         # <-- change si tu veux
+  MYSQL_USER: empuser                      # <-- change si tu veux
+  MYSQL_PASSWORD: emppass123               # <-- change si tu veux
+
+---
+# =========================
+# 2) MySQL (DEV) - éphémère
+# =========================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mysql
+  namespace: jenkins
+  labels:
+    app: mysql
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: mysql
+  template:
+    metadata:
+      labels:
+        app: mysql
+    spec:
+      terminationGracePeriodSeconds: 20
+      containers:
+        - name: mysql
+          image: mysql:8.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3306
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: MYSQL_ROOT_PASSWORD
+            - name: MYSQL_DATABASE
+              value: empdb
+            - name: MYSQL_USER
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: MYSQL_USER
+            - name: MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: MYSQL_PASSWORD
+          readinessProbe:
+            tcpSocket:
+              port: 3306
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            tcpSocket:
+              port: 3306
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 6
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/mysql   # ⚠️ emptyDir => données non persistées (dev)
+      volumes:
+        - name: data
+          emptyDir: {}                    # met un PVC pour la prod
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql
+  namespace: jenkins
+  labels:
+    app: mysql
+spec:
+  selector:
+    app: mysql
+  ports:
+    - name: mysql
+      port: 3306
+      targetPort: 3306
+      protocol: TCP
+
+---
+# =========================
+# 3) Backend Spring Boot
+# =========================
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -12,7 +111,7 @@ spec:
   replicas: 1
   revisionHistoryLimit: 2
   strategy:
-    type: Recreate                 # évite d’attendre l’extinction de l’ancien pod
+    type: Recreate
   selector:
     matchLabels:
       app: gestionentreprise
@@ -22,29 +121,47 @@ spec:
         app: gestionentreprise
     spec:
       terminationGracePeriodSeconds: 20
+      # Attend que MySQL réponde avant de démarrer l'app
+      initContainers:
+        - name: wait-mysql
+          image: busybox:1.36
+          command: ["sh","-c"]
+          args: ["until nc -w 2 -z mysql 3306; do echo '⏳ waiting mysql...'; sleep 2; done"]
       containers:
         - name: app
           image: docker.io/adelbettaieb/gestionentreprise:latest
-          imagePullPolicy: Always   # force le pull de :latest à chaque déploiement
+          imagePullPolicy: Always
           ports:
             - containerPort: 8080
           env:
             - name: JAVA_OPTS
               value: ""
-          # Probes basées sur le port TCP (sûr si pas d'endpoint /health)
+            - name: SPRING_DATASOURCE_URL
+              value: jdbc:mysql://mysql:3306/empdb?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
+            - name: SPRING_DATASOURCE_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: MYSQL_USER
+            - name: SPRING_DATASOURCE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: MYSQL_PASSWORD
+            - name: SPRING_JPA_HIBERNATE_DDL_AUTO
+              value: update
           readinessProbe:
             tcpSocket:
               port: 8080
-            initialDelaySeconds: 10
+            initialDelaySeconds: 15
             periodSeconds: 5
-            failureThreshold: 12
+            failureThreshold: 24
           livenessProbe:
             tcpSocket:
               port: 8080
             initialDelaySeconds: 30
             periodSeconds: 10
             failureThreshold: 6
-          # (optionnel) alloue un peu de ressources pour éviter l'éviction
           resources:
             requests:
               cpu: "100m"
@@ -54,9 +171,6 @@ spec:
               memory: "512Mi"
 
 ---
-# ---------------------------
-# Service
-# ---------------------------
 apiVersion: v1
 kind: Service
 metadata:
@@ -74,9 +188,9 @@ spec:
       protocol: TCP
 
 ---
-# ---------------------------
-# Ingress (NGINX)
-# ---------------------------
+# =========================
+# 4) Ingress (NGINX)
+# =========================
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
