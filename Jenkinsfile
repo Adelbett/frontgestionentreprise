@@ -54,7 +54,8 @@ spec:
   - name: kaniko
     image: gcr.io/kaniko-project/executor:v1.23.2-debug
     imagePullPolicy: IfNotPresent
-    command: ["/busybox/sh","-c"]     # GARANTI: shell présent
+    # keep-alive + shell dispo pour les 'sh' Jenkins
+    command: ["/busybox/sh","-c"]
     args: ["sleep 99d"]
     tty: true
     env:
@@ -70,7 +71,7 @@ spec:
   - name: kubectl
     image: bitnami/kubectl:1.29-debian-12
     imagePullPolicy: IfNotPresent
-    command: ["/bin/sh","-c"]         # GARANTI: shell présent
+    command: ["/bin/sh","-c"]         # conteneur vivant
     args: ["sleep 99d"]
     tty: true
     securityContext:
@@ -92,7 +93,7 @@ spec:
     emptyDir: {}
 """
       defaultContainer 'kubectl'
-      // cloud 'kubernetes'  // décommente seulement si ton Cloud a un autre nom
+      // cloud 'kubernetes'  // décommente seulement si ton Cloud a un autre nom dans Jenkins
     }
   }
 
@@ -150,7 +151,7 @@ spec:
             sh '''
               set -eux
               npm ci || npm install
-              npm run build || true
+              npm run build
             '''
           }
         }
@@ -180,12 +181,15 @@ spec:
           sh '''
             set -eux
             test -f "$WORKSPACE/emp_backend/Dockerfile"
+
+            # Tag CI (ex: feature-12 ou latest si main)
             /kaniko/executor \
               --context "$WORKSPACE/emp_backend" \
               --dockerfile Dockerfile \
               --destination "docker.io/$DOCKER_IMAGE:$TAG" \
               --snapshot-mode=redo --verbosity=info
 
+            # Tag latest quand on est sur main
             if [ "$BRANCH_NAME" = "main" ]; then
               /kaniko/executor \
                 --context "$WORKSPACE/emp_backend" \
