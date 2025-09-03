@@ -1,4 +1,7 @@
-﻿apiVersion: apps/v1
+﻿# ---------------------------
+# Deployment
+# ---------------------------
+apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: gestionentreprise
@@ -7,11 +10,9 @@ metadata:
     app: gestionentreprise
 spec:
   replicas: 1
+  revisionHistoryLimit: 2
   strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxSurge: 1
-      maxUnavailable: 0
+    type: Recreate                 # évite d’attendre l’extinction de l’ancien pod
   selector:
     matchLabels:
       app: gestionentreprise
@@ -20,15 +21,17 @@ spec:
       labels:
         app: gestionentreprise
     spec:
+      terminationGracePeriodSeconds: 20
       containers:
         - name: app
           image: docker.io/adelbettaieb/gestionentreprise:latest
-          imagePullPolicy: Always
+          imagePullPolicy: Always   # force le pull de :latest à chaque déploiement
           ports:
             - containerPort: 8080
           env:
             - name: JAVA_OPTS
               value: ""
+          # Probes basées sur le port TCP (sûr si pas d'endpoint /health)
           readinessProbe:
             tcpSocket:
               port: 8080
@@ -41,7 +44,19 @@ spec:
             initialDelaySeconds: 30
             periodSeconds: 10
             failureThreshold: 6
+          # (optionnel) alloue un peu de ressources pour éviter l'éviction
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+
 ---
+# ---------------------------
+# Service
+# ---------------------------
 apiVersion: v1
 kind: Service
 metadata:
@@ -57,7 +72,11 @@ spec:
       port: 80
       targetPort: 8080
       protocol: TCP
+
 ---
+# ---------------------------
+# Ingress (NGINX)
+# ---------------------------
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
