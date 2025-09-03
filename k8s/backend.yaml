@@ -1,8 +1,8 @@
-apiVersion: apps/v1
+﻿apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: gestionentreprise-backend
-  namespace: default
+namespace: jenkins
 spec:
   replicas: 1
   selector:
@@ -19,7 +19,7 @@ spec:
           image: docker.io/adelbettaieb/gestionentreprise:latest
           ports:
             - containerPort: 8080
-          # dé-commente si tu as des variables env (DB, etc.)
+          # dÃ©-commente si tu as des variables env (DB, etc.)
           # env:
           #   - name: SPRING_DATASOURCE_URL
           #     value: jdbc:mysql://mysql:3306/...
@@ -28,7 +28,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: gestionentreprise-svc
-  namespace: default
+namespace: jenkins
 spec:
   selector:
     app: gestionentreprise-backend
