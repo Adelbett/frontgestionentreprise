@@ -175,32 +175,41 @@ spec:
       }
     }
 
-    stage('Build & Push Image (Kaniko)') {
-      steps {
-        container('kaniko') {
-          sh '''
-            set -eux
-            test -f "$WORKSPACE/emp_backend/Dockerfile"
+stage('Build & Push Image (Kaniko)') {
+  environment {
+    DOCKER_IMAGE = 'adelbettaieb/gestionentreprise'
+    CONTEXT_DIR  = "${WORKSPACE}/emp_backend"
+    DOCKERFILE   = "${WORKSPACE}/emp_backend/Dockerfile"
+  }
+  steps {
+    container('kaniko') {
+      sh '''
+        set -euxo pipefail
 
-            # Tag CI (ex: feature-12 ou latest si main)
-            /kaniko/executor \
-              --context "$WORKSPACE/emp_backend" \
-              --dockerfile Dockerfile \
-              --destination "docker.io/$DOCKER_IMAGE:$TAG" \
-              --snapshot-mode=redo --verbosity=info
+        # Le Dockerfile doit exister
+        test -f "$DOCKERFILE"
 
-            # Tag latest quand on est sur main
-            if [ "$BRANCH_NAME" = "main" ]; then
-              /kaniko/executor \
-                --context "$WORKSPACE/emp_backend" \
-                --dockerfile Dockerfile \
-                --destination "docker.io/$DOCKER_IMAGE:latest" \
-                --snapshot-mode=redo --verbosity=info
-            fi
-          '''
-        }
-      }
+        # Build + push avec 2 tags: commit et nom de branche
+        /kaniko/executor \
+          --context "$CONTEXT_DIR" \
+          --dockerfile "$DOCKERFILE" \
+          --destination "docker.io/$DOCKER_IMAGE:$GIT_COMMIT" \
+          --destination "docker.io/$DOCKER_IMAGE:$BRANCH_NAME" \
+          --snapshot-mode=redo --verbosity=info
+
+        # Si on est sur main, pousser aussi :latest
+        if [ "$BRANCH_NAME" = "main" ]; then
+          /kaniko/executor \
+            --context "$CONTEXT_DIR" \
+            --dockerfile "$DOCKERFILE" \
+            --destination "docker.io/$DOCKER_IMAGE:latest" \
+            --snapshot-mode=redo --verbosity=info
+        fi
+      '''
     }
+  }
+}
+
 
     stage('Deploy to Kubernetes') {
       steps {
