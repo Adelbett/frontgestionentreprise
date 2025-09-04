@@ -1,11 +1,11 @@
 // =======================
-// Jenkinsfile (Declarative) — profil "RAM light"
+// Jenkinsfile (Declarative) — profil "RAM light" STABLE
 // =======================
 pipeline {
 
   agent {
     kubernetes {
-      cloud 'Kubernetes'                  // Nom exact de ton cloud dans Jenkins
+      cloud 'Kubernetes'
       yaml """
 apiVersion: v1
 kind: Pod
@@ -33,24 +33,18 @@ spec:
   - name: node
     image: docker.io/library/node:20-bullseye
     imagePullPolicy: IfNotPresent
-    command: ["cat"]                  # keep-alive
+    command: ["cat"]
     tty: true
     workingDir: /home/jenkins/agent
     env:
     - name: NPM_CONFIG_CACHE
       value: /home/jenkins/.npm
-    resources:                       # <<< demandes/limites modestes
-      requests:
-        cpu: "300m"
-        memory: "768Mi"
-      limits:
-        cpu: "1"
-        memory: "1536Mi"
+    resources:
+      requests: { cpu: "300m", memory: "768Mi" }
+      limits:   { cpu: "1",    memory: "1536Mi" }
     volumeMounts:
-    - name: workspace-volume
-      mountPath: /home/jenkins/agent
-    - name: npm-cache
-      mountPath: /home/jenkins/.npm
+    - { name: workspace-volume, mountPath: /home/jenkins/agent }
+    - { name: npm-cache,       mountPath: /home/jenkins/.npm }
 
   - name: maven
     image: docker.io/library/maven:3.9-eclipse-temurin-17
@@ -58,9 +52,14 @@ spec:
     command: ["cat"]
     tty: true
     workingDir: /home/jenkins/agent
+    env:
+    - { name: MAVEN_CONFIG, value: /home/jenkins/.m2 }
+    resources:
+      requests: { cpu: "300m", memory: "768Mi" }
+      limits:   { cpu: "1",    memory: "1536Mi" }
     volumeMounts:
-    - name: workspace-volume
-      mountPath: /home/jenkins/agent
+    - { name: workspace-volume, mountPath: /home/jenkins/agent }
+    - { name: m2-cache,         mountPath: /home/jenkins/.m2 }
 
   - name: kaniko
     image: gcr.io/kaniko-project/executor:v1.23.2-debug
@@ -68,14 +67,14 @@ spec:
     command: ["cat"]
     tty: true
     env:
-    - name: DOCKER_CONFIG
-      value: /kaniko/.docker
+    - { name: DOCKER_CONFIG, value: /kaniko/.docker }
     workingDir: /home/jenkins/agent
+    resources:
+      requests: { cpu: "300m", memory: "1Gi" }
+      limits:   { cpu: "1",    memory: "2Gi" }
     volumeMounts:
-    - name: docker-config
-      mountPath: /kaniko/.docker
-    - name: workspace-volume
-      mountPath: /home/jenkins/agent
+    - { name: docker-config,    mountPath: /kaniko/.docker }
+    - { name: workspace-volume, mountPath: /home/jenkins/agent }
 
   - name: kubectl
     image: bitnami/kubectl:1.29-debian-12
@@ -83,26 +82,26 @@ spec:
     command: ["/bin/sh","-c"]
     args: ["sleep 99d"]
     tty: true
-    securityContext:
-      runAsUser: 0
+    securityContext: { runAsUser: 0 }
     workingDir: /home/jenkins/agent
     volumeMounts:
-    - name: workspace-volume
-      mountPath: /home/jenkins/agent
+    - { name: workspace-volume, mountPath: /home/jenkins/agent }
 
   volumes:
   - name: docker-config
     secret:
       secretName: regcred
       items:
-      - key: .dockerconfigjson
-        path: config.json
+      - { key: .dockerconfigjson, path: config.json }
 
   - name: workspace-volume
     emptyDir: {}
 
   - name: npm-cache
-    emptyDir: {}                      # cache npm éphémère mais réutilisé durant le build
+    emptyDir: {}          # cache npm
+
+  - name: m2-cache
+    emptyDir: {}          # cache Maven
 """
       defaultContainer 'kubectl'
     }
@@ -143,7 +142,9 @@ spec:
 
     stage('Sanity sh') {
       steps {
-        container('kubectl') { sh 'set -x; whoami || true; pwd; ls -ld .; df -h; free -m' }
+        container('kubectl') {
+          sh 'set -x; whoami || true; pwd; ls -ld .; df -h; free -m'
+        }
       }
     }
 
@@ -157,25 +158,24 @@ spec:
 
     stage('Build Frontend') {
       steps {
-        container('node') {
-          dir('employee frontend final') {
-            timeout(time: 25, unit: 'MINUTES') {
-              sh '''
-                set -eux
-                export NG_CLI_ANALYTICS=false
-                export CI=true
-                # Limite mémoire Node ~1.5Go
-                export NODE_OPTIONS="--max-old-space-size=1536"
-                # 1 worker = moins de pics CPU/RAM
-                export NG_BUILD_MAX_WORKERS=1
+        retry(2) {
+          timeout(time: 25, unit: 'MINUTES') {
+            container('node') {
+              dir('employee frontend final') {
+                sh '''
+                  set -eux
+                  export NG_CLI_ANALYTICS=false
+                  export CI=true
+                  export NODE_OPTIONS="--max-old-space-size=1536"
+                  export NG_BUILD_MAX_WORKERS=1
 
-                # Evite les audits & baratin, utilise le cache
-                npm config set fund false
-                npm ci --prefer-offline --no-audit --progress=false || npm install --prefer-offline --no-audit --progress=false
+                  npm config set fund false
+                  npm ci --prefer-offline --no-audit --progress=false || \
+                  npm install --prefer-offline --no-audit --progress=false
 
-                # Build prod sans progress bar
-                npm run build -- --configuration=production --no-progress
-              '''
+                  npm run build -- --configuration=production --no-progress
+                '''
+              }
             }
           }
         }
@@ -184,16 +184,25 @@ spec:
 
     stage('Build Backend (Maven)') {
       steps {
-        container('maven') {
-          dir('emp_backend') {
-            sh '''
-              set -eux
-              if [ -x ./mvnw ]; then
-                ./mvnw -B -DskipTests package
-              else
-                mvn -B -DskipTests package
-              fi
-            '''
+        retry(2) {
+          timeout(time: 35, unit: 'MINUTES') {
+            container('maven') {
+              dir('emp_backend') {
+                sh '''
+                  set -eux
+                  export MAVEN_OPTS="-Xms256m -Xmx1024m -XX:+UseSerialGC -Djava.awt.headless=true"
+                  MVN_COMMON="-B -Dmaven.repo.local=$MAVEN_CONFIG \
+                    -Dhttp.keepAlive=false -Dmaven.wagon.http.pool=false \
+                    -Dmaven.wagon.http.retryHandler.count=3"
+
+                  if [ -x ./mvnw ]; then
+                    ./mvnw  $MVN_COMMON -DskipTests package
+                  else
+                    mvn     $MVN_COMMON -DskipTests package
+                  fi
+                '''
+              }
+            }
           }
         }
       }
@@ -201,70 +210,78 @@ spec:
 
     stage('Build & Push Image (Kaniko)') {
       steps {
-        container('kaniko') {
-          sh '''
-            set -euo pipefail
-            CONTEXT_DIR="$WORKSPACE/emp_backend"
-            DOCKERFILE="$CONTEXT_DIR/Dockerfile"
+        retry(2) {
+          timeout(time: 30, unit: 'MINUTES') {
+            container('kaniko') {
+              sh '''
+                set -euo pipefail
+                CONTEXT_DIR="$WORKSPACE/emp_backend"
+                DOCKERFILE="$CONTEXT_DIR/Dockerfile"
 
-            test -d "$CONTEXT_DIR"
-            test -f "$DOCKERFILE"
+                test -d "$CONTEXT_DIR"
+                test -f "$DOCKERFILE"
 
-            echo ">> Push : ${DOCKER_IMAGE}:${TAG}"
-            /kaniko/executor \
-              --context "$CONTEXT_DIR" \
-              --dockerfile "$DOCKERFILE" \
-              --destination "docker.io/$DOCKER_IMAGE:$TAG" \
-              --snapshot-mode=redo --verbosity=info
+                echo ">> Push : ${DOCKER_IMAGE}:${TAG}"
+                /kaniko/executor \
+                  --context "$CONTEXT_DIR" \
+                  --dockerfile "$DOCKERFILE" \
+                  --destination "docker.io/$DOCKER_IMAGE:$TAG" \
+                  --snapshot-mode=redo --verbosity=info
 
-            if [ -n "${SHORT_SHA:-}" ]; then
-              echo ">> Also push commit tag: $SHORT_SHA"
-              /kaniko/executor \
-                --context "$CONTEXT_DIR" \
-                --dockerfile "$DOCKERFILE" \
-                --destination "docker.io/$DOCKER_IMAGE:$SHORT_SHA" \
-                --snapshot-mode=redo --verbosity=info
-            fi
+                if [ -n "${SHORT_SHA:-}" ]; then
+                  echo ">> Also push commit tag: $SHORT_SHA"
+                  /kaniko/executor \
+                    --context "$CONTEXT_DIR" \
+                    --dockerfile "$DOCKERFILE" \
+                    --destination "docker.io/$DOCKER_IMAGE:$SHORT_SHA" \
+                    --snapshot-mode=redo --verbosity=info
+                fi
 
-            if [ -n "${SAFE_BRANCH:-}" ] && [ "$SAFE_BRANCH" != "main" ]; then
-              echo ">> Also push branch tag: $SAFE_BRANCH"
-              /kaniko/executor \
-                --context "$CONTEXT_DIR" \
-                --dockerfile "$DOCKERFILE" \
-                --destination "docker.io/$DOCKER_IMAGE:$SAFE_BRANCH" \
-                --snapshot-mode=redo --verbosity=info
-            fi
-          '''
+                if [ -n "${SAFE_BRANCH:-}" ] && [ "$SAFE_BRANCH" != "main" ]; then
+                  echo ">> Also push branch tag: $SAFE_BRANCH"
+                  /kaniko/executor \
+                    --context "$CONTEXT_DIR" \
+                    --dockerfile "$DOCKERFILE" \
+                    --destination "docker.io/$DOCKER_IMAGE:$SAFE_BRANCH" \
+                    --snapshot-mode=redo --verbosity=info
+                fi
+              '''
+            }
+          }
         }
       }
     }
 
     stage('Deploy to Kubernetes') {
       steps {
-        container('kubectl') {
-          sh '''
-            set -eux
-            test -d "$WORKSPACE/k8s"
-            kubectl -n "$K8S_NS" apply -f "$WORKSPACE/k8s"
+        retry(2) {
+          container('kubectl') {
+            sh '''
+              set -eux
+              test -d "$WORKSPACE/k8s"
+              kubectl -n "$K8S_NS" apply -f "$WORKSPACE/k8s"
 
-            DEPLOY_TAG="${SHORT_SHA:-$TAG}"
-            echo "Deploying docker.io/$DOCKER_IMAGE:$DEPLOY_TAG"
-            kubectl -n "$K8S_NS" set image deploy/$APP_NAME app="docker.io/$DOCKER_IMAGE:$DEPLOY_TAG"
-            kubectl -n "$K8S_NS" rollout status deploy/$APP_NAME --timeout=420s
-          '''
+              DEPLOY_TAG="${SHORT_SHA:-$TAG}"
+              echo "Deploying docker.io/$DOCKER_IMAGE:$DEPLOY_TAG"
+              kubectl -n "$K8S_NS" set image deploy/$APP_NAME app="docker.io/$DOCKER_IMAGE:$DEPLOY_TAG"
+              kubectl -n "$K8S_NS" rollout status deploy/$APP_NAME --timeout=420s
+            '''
+          }
         }
       }
     }
 
     stage('Smoke Test (Ingress)') {
       steps {
-        container('kubectl') {
-          sh '''
-            set -eux
-            kubectl -n "$K8S_NS" run smoke --rm -i --restart=Never --image=curlimages/curl -- \
-              -sSI -H "Host: $INGRESS_HOST" \
-              http://ingress-nginx-controller.ingress-nginx.svc.cluster.local/ | head -n1
-          '''
+        retry(2) {
+          container('kubectl') {
+            sh '''
+              set -eux
+              kubectl -n "$K8S_NS" run smoke --rm -i --restart=Never --image=curlimages/curl -- \
+                -sSI -H "Host: $INGRESS_HOST" \
+                http://ingress-nginx-controller.ingress-nginx.svc.cluster.local/ | head -n1
+            '''
+          }
         }
       }
     }
@@ -273,5 +290,6 @@ spec:
   post {
     success { echo "✅ Deployed docker.io/$DOCKER_IMAGE:${SHORT_SHA:-$TAG} to namespace $K8S_NS" }
     failure { echo "❌ Build failed — check the first failing stage in Console Output" }
+    always  { cleanWs() }
   }
 }
