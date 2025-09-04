@@ -287,9 +287,20 @@ spec:
     }
   }
 
-  post {
-    success { echo "✅ Deployed docker.io/$DOCKER_IMAGE:${SHORT_SHA:-$TAG} to namespace $K8S_NS" }
-    failure { echo "❌ Build failed — check the first failing stage in Console Output" }
-    always  { cleanWs() }
+post {
+  success {
+    script {
+      // fallback: SHORT_SHA si présent, sinon TAG, sinon "latest"
+      def deployedTag = (env.SHORT_SHA?.trim()) ? env.SHORT_SHA : (env.TAG?.trim() ?: 'latest')
+      echo "✅ Deployed docker.io/${env.DOCKER_IMAGE}:${deployedTag} to namespace ${env.K8S_NS}"
+    }
   }
+  failure {
+    echo "❌ Build failed — check the first failing stage in Console Output"
+  }
+  always {
+    cleanWs()
+  }
+}
+
 }
