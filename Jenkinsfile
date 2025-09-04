@@ -5,7 +5,7 @@ pipeline {
 
   agent {
     kubernetes {
-      cloud 'kubernetes'         // assure l'usage du bon Cloud
+      cloud 'Kubernetes'         // assure l'usage du bon Cloud
       yaml """
 apiVersion: v1
 kind: Pod
