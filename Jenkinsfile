@@ -1,11 +1,11 @@
 // =======================
-// Jenkinsfile (Declarative)
+// Jenkinsfile (Declarative) — profil "RAM light"
 // =======================
 pipeline {
 
   agent {
     kubernetes {
-      cloud 'Kubernetes'         // assure l'usage du bon Cloud
+      cloud 'Kubernetes'                  // Nom exact de ton cloud dans Jenkins
       yaml """
 apiVersion: v1
 kind: Pod
@@ -33,19 +33,24 @@ spec:
   - name: node
     image: docker.io/library/node:20-bullseye
     imagePullPolicy: IfNotPresent
-    command: ["cat"]
+    command: ["cat"]                  # keep-alive
     tty: true
     workingDir: /home/jenkins/agent
-    resources:
+    env:
+    - name: NPM_CONFIG_CACHE
+      value: /home/jenkins/.npm
+    resources:                       # <<< demandes/limites modestes
       requests:
-        cpu: "500m"
-        memory: "1Gi"
+        cpu: "300m"
+        memory: "768Mi"
       limits:
-        cpu: "2"
-        memory: "3Gi"
+        cpu: "1"
+        memory: "1536Mi"
     volumeMounts:
     - name: workspace-volume
       mountPath: /home/jenkins/agent
+    - name: npm-cache
+      mountPath: /home/jenkins/.npm
 
   - name: maven
     image: docker.io/library/maven:3.9-eclipse-temurin-17
@@ -95,6 +100,9 @@ spec:
 
   - name: workspace-volume
     emptyDir: {}
+
+  - name: npm-cache
+    emptyDir: {}                      # cache npm éphémère mais réutilisé durant le build
 """
       defaultContainer 'kubectl'
     }
@@ -135,9 +143,7 @@ spec:
 
     stage('Sanity sh') {
       steps {
-        container('kubectl') {
-          sh 'set -x; whoami || true; pwd; ls -ld .'
-        }
+        container('kubectl') { sh 'set -x; whoami || true; pwd; ls -ld .; df -h; free -m' }
       }
     }
 
@@ -158,13 +164,16 @@ spec:
                 set -eux
                 export NG_CLI_ANALYTICS=false
                 export CI=true
-                # Donne plus de mémoire au process Node (Angular build)
-                export NODE_OPTIONS="--max-old-space-size=3072"
-                # Limite le parallélisme des workers esbuild pour éviter l'OOM
-                export NG_BUILD_MAX_WORKERS=2
+                # Limite mémoire Node ~1.5Go
+                export NODE_OPTIONS="--max-old-space-size=1536"
+                # 1 worker = moins de pics CPU/RAM
+                export NG_BUILD_MAX_WORKERS=1
 
-                npm ci || npm install
-                # l'argument après -- est transmis à "ng build"
+                # Evite les audits & baratin, utilise le cache
+                npm config set fund false
+                npm ci --prefer-offline --no-audit --progress=false || npm install --prefer-offline --no-audit --progress=false
+
+                # Build prod sans progress bar
                 npm run build -- --configuration=production --no-progress
               '''
             }
@@ -241,7 +250,6 @@ spec:
             DEPLOY_TAG="${SHORT_SHA:-$TAG}"
             echo "Deploying docker.io/$DOCKER_IMAGE:$DEPLOY_TAG"
             kubectl -n "$K8S_NS" set image deploy/$APP_NAME app="docker.io/$DOCKER_IMAGE:$DEPLOY_TAG"
-
             kubectl -n "$K8S_NS" rollout status deploy/$APP_NAME --timeout=420s
           '''
         }
