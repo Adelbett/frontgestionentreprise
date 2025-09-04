@@ -17,7 +17,6 @@ spec:
   imagePullSecrets:
   - name: regcred
 
-  # Workspace partagé accessible en écriture
   securityContext:
     fsGroup: 1000
 
@@ -34,7 +33,7 @@ spec:
   - name: node
     image: docker.io/library/node:20-bullseye
     imagePullPolicy: IfNotPresent
-    command: ["cat"]                 # keep-alive
+    command: ["cat"]
     tty: true
     workingDir: /home/jenkins/agent
     volumeMounts:
@@ -44,7 +43,7 @@ spec:
   - name: maven
     image: docker.io/library/maven:3.9-eclipse-temurin-17
     imagePullPolicy: IfNotPresent
-    command: ["cat"]                 # keep-alive
+    command: ["cat"]
     tty: true
     workingDir: /home/jenkins/agent
     volumeMounts:
@@ -54,7 +53,7 @@ spec:
   - name: kaniko
     image: gcr.io/kaniko-project/executor:v1.23.2-debug
     imagePullPolicy: IfNotPresent
-    command: ["cat"]                 # ✅ keep-alive fiable
+    command: ["cat"]            # keep-alive fiable
     tty: true
     env:
     - name: DOCKER_CONFIG
@@ -69,11 +68,11 @@ spec:
   - name: kubectl
     image: bitnami/kubectl:1.29-debian-12
     imagePullPolicy: IfNotPresent
-    command: ["/bin/sh","-c"]        # keep-alive
+    command: ["/bin/sh","-c"]
     args: ["sleep 99d"]
     tty: true
     securityContext:
-      runAsUser: 0                   # évite soucis d’exec/permissions
+      runAsUser: 0
     workingDir: /home/jenkins/agent
     volumeMounts:
     - name: workspace-volume
@@ -91,14 +90,14 @@ spec:
     emptyDir: {}
 """
       defaultContainer 'kubectl'
-      // cloud 'kubernetes'  // décommente seulement si ton Cloud a un autre nom dans Jenkins
+      // cloud 'kubernetes' // décommente si ton Cloud a un autre nom
     }
   }
 
   options {
     timestamps()
     buildDiscarder(logRotator(numToKeepStr: '20'))
-    skipDefaultCheckout(true)   // évite le double "Declarative: Checkout SCM"
+    skipDefaultCheckout(true)
   }
 
   triggers { githubPush() }
@@ -112,6 +111,7 @@ spec:
 
   stages {
 
+    // IMPORTANT: Checkout AVANT d'utiliser GIT_COMMIT
     stage('Checkout') {
       steps { checkout scm }
     }
@@ -125,7 +125,7 @@ spec:
           env.SHORT_SHA   = (env.GIT_COMMIT ? env.GIT_COMMIT.take(7) : '')
           env.TAG         = (safeBranch == 'main') ? 'latest' : "${safeBranch}-${env.BUILD_NUMBER}"
           echo "Docker image => docker.io/${env.DOCKER_IMAGE}:${env.TAG}"
-          if (env.SHORT_SHA) { echo "SHORT_SHA=${env.SHORT_SHA}" }
+          echo "SHORT_SHA=${env.SHORT_SHA}"
         }
       }
     }
@@ -149,7 +149,7 @@ spec:
     stage('Build Frontend') {
       steps {
         container('node') {
-          dir('employee frontend final') { // 🔁 renomme si ton dossier diffère
+          dir('employee frontend final') {
             sh '''
               set -eux
               npm ci || npm install
@@ -182,36 +182,36 @@ spec:
         container('kaniko') {
           sh '''
             set -euo pipefail
-
             CONTEXT_DIR="$WORKSPACE/emp_backend"
             DOCKERFILE="$CONTEXT_DIR/Dockerfile"
 
             test -d "$CONTEXT_DIR"
             test -f "$DOCKERFILE"
 
-            echo ">> Build & push docker.io/$DOCKER_IMAGE:$TAG"
+            echo ">> Push : ${DOCKER_IMAGE}:${TAG}"
             /kaniko/executor \
               --context "$CONTEXT_DIR" \
               --dockerfile "$DOCKERFILE" \
               --destination "docker.io/$DOCKER_IMAGE:$TAG" \
               --snapshot-mode=redo --verbosity=info
 
-            # Tags additionnels (facultatifs)
-            if [ -n "${SAFE_BRANCH:-}" ] && [ "$SAFE_BRANCH" != "main" ]; then
-              echo ">> Also tag branch: $SAFE_BRANCH"
-              /kaniko/executor \
-                --context "$CONTEXT_DIR" \
-                --dockerfile "$DOCKERFILE" \
-                --destination "docker.io/$DOCKER_IMAGE:$SAFE_BRANCH" \
-                --snapshot-mode=redo --verbosity=info
-            fi
-
+            # Toujours pousser le tag commit (immuable)
             if [ -n "${SHORT_SHA:-}" ]; then
-              echo ">> Also tag commit: $SHORT_SHA"
+              echo ">> Also push commit tag: $SHORT_SHA"
               /kaniko/executor \
                 --context "$CONTEXT_DIR" \
                 --dockerfile "$DOCKERFILE" \
                 --destination "docker.io/$DOCKER_IMAGE:$SHORT_SHA" \
+                --snapshot-mode=redo --verbosity=info
+            fi
+
+            # Optionnel: tag de branche (sauf main)
+            if [ -n "${SAFE_BRANCH:-}" ] && [ "$SAFE_BRANCH" != "main" ]; then
+              echo ">> Also push branch tag: $SAFE_BRANCH"
+              /kaniko/executor \
+                --context "$CONTEXT_DIR" \
+                --dockerfile "$DOCKERFILE" \
+                --destination "docker.io/$DOCKER_IMAGE:$SAFE_BRANCH" \
                 --snapshot-mode=redo --verbosity=info
             fi
           '''
@@ -226,8 +226,15 @@ spec:
             set -eux
             test -d "$WORKSPACE/k8s"
             kubectl -n "$K8S_NS" apply -f "$WORKSPACE/k8s"
-            kubectl -n "$K8S_NS" set image deploy/$APP_NAME app="docker.io/$DOCKER_IMAGE:$TAG" --record
-            kubectl -n "$K8S_NS" rollout status deploy/$APP_NAME --timeout=180s
+
+            # Déploie un tag immuable (commit) si dispo, sinon TAG (latest sur main)
+            DEPLOY_TAG="${SHORT_SHA:-$TAG}"
+            echo "Deploying docker.io/$DOCKER_IMAGE:$DEPLOY_TAG"
+
+            kubectl -n "$K8S_NS" set image deploy/$APP_NAME app="docker.io/$DOCKER_IMAGE:$DEPLOY_TAG"
+
+            # Laisse le temps au Pod de (re)partir
+            kubectl -n "$K8S_NS" rollout status deploy/$APP_NAME --timeout=420s
           '''
         }
       }
@@ -248,7 +255,7 @@ spec:
   }
 
   post {
-    success { echo "✅ Deployed docker.io/$DOCKER_IMAGE:$TAG to namespace $K8S_NS" }
+    success { echo "✅ Deployed docker.io/$DOCKER_IMAGE:${SHORT_SHA:-$TAG} to namespace $K8S_NS" }
     failure { echo "❌ Build failed — check the first failing stage in Console Output" }
   }
 }
