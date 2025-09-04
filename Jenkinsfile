@@ -3,9 +3,9 @@
 // =======================
 pipeline {
 
-  // Build inside a Kubernetes agent pod
   agent {
     kubernetes {
+      cloud 'kubernetes'         // assure l'usage du bon Cloud
       yaml """
 apiVersion: v1
 kind: Pod
@@ -36,6 +36,13 @@ spec:
     command: ["cat"]
     tty: true
     workingDir: /home/jenkins/agent
+    resources:
+      requests:
+        cpu: "500m"
+        memory: "1Gi"
+      limits:
+        cpu: "2"
+        memory: "3Gi"
     volumeMounts:
     - name: workspace-volume
       mountPath: /home/jenkins/agent
@@ -53,7 +60,7 @@ spec:
   - name: kaniko
     image: gcr.io/kaniko-project/executor:v1.23.2-debug
     imagePullPolicy: IfNotPresent
-    command: ["cat"]            # keep-alive fiable
+    command: ["cat"]
     tty: true
     env:
     - name: DOCKER_CONFIG
@@ -90,7 +97,6 @@ spec:
     emptyDir: {}
 """
       defaultContainer 'kubectl'
-      // cloud 'kubernetes' // décommente si ton Cloud a un autre nom
     }
   }
 
@@ -111,10 +117,7 @@ spec:
 
   stages {
 
-    // IMPORTANT: Checkout AVANT d'utiliser GIT_COMMIT
-    stage('Checkout') {
-      steps { checkout scm }
-    }
+    stage('Checkout') { steps { checkout scm } }
 
     stage('Init vars') {
       steps {
@@ -150,11 +153,21 @@ spec:
       steps {
         container('node') {
           dir('employee frontend final') {
-            sh '''
-              set -eux
-              npm ci || npm install
-              npm run build
-            '''
+            timeout(time: 25, unit: 'MINUTES') {
+              sh '''
+                set -eux
+                export NG_CLI_ANALYTICS=false
+                export CI=true
+                # Donne plus de mémoire au process Node (Angular build)
+                export NODE_OPTIONS="--max-old-space-size=3072"
+                # Limite le parallélisme des workers esbuild pour éviter l'OOM
+                export NG_BUILD_MAX_WORKERS=2
+
+                npm ci || npm install
+                # l'argument après -- est transmis à "ng build"
+                npm run build -- --configuration=production --no-progress
+              '''
+            }
           }
         }
       }
@@ -195,7 +208,6 @@ spec:
               --destination "docker.io/$DOCKER_IMAGE:$TAG" \
               --snapshot-mode=redo --verbosity=info
 
-            # Toujours pousser le tag commit (immuable)
             if [ -n "${SHORT_SHA:-}" ]; then
               echo ">> Also push commit tag: $SHORT_SHA"
               /kaniko/executor \
@@ -205,7 +217,6 @@ spec:
                 --snapshot-mode=redo --verbosity=info
             fi
 
-            # Optionnel: tag de branche (sauf main)
             if [ -n "${SAFE_BRANCH:-}" ] && [ "$SAFE_BRANCH" != "main" ]; then
               echo ">> Also push branch tag: $SAFE_BRANCH"
               /kaniko/executor \
@@ -227,13 +238,10 @@ spec:
             test -d "$WORKSPACE/k8s"
             kubectl -n "$K8S_NS" apply -f "$WORKSPACE/k8s"
 
-            # Déploie un tag immuable (commit) si dispo, sinon TAG (latest sur main)
             DEPLOY_TAG="${SHORT_SHA:-$TAG}"
             echo "Deploying docker.io/$DOCKER_IMAGE:$DEPLOY_TAG"
-
             kubectl -n "$K8S_NS" set image deploy/$APP_NAME app="docker.io/$DOCKER_IMAGE:$DEPLOY_TAG"
 
-            # Laisse le temps au Pod de (re)partir
             kubectl -n "$K8S_NS" rollout status deploy/$APP_NAME --timeout=420s
           '''
         }
