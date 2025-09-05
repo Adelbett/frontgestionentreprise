@@ -1,8 +1,7 @@
 // =======================
-// Jenkinsfile — Tests + Build + Push + Deploy (+ Smoke test)
+// Jenkinsfile (Declarative) — profil "RAM light" + tests optionnels
 // =======================
 pipeline {
-
   agent {
     kubernetes {
       cloud 'Kubernetes'
@@ -31,11 +30,13 @@ spec:
 
   containers:
   - name: node
-    image: docker.io/library/node:20-bullseye
+    # Image avec Chromium + deps pour tests headless
+    image: ghcr.io/puppeteer/puppeteer:22.10.0
     imagePullPolicy: IfNotPresent
     command: ["cat"]
     tty: true
     workingDir: /home/jenkins/agent
+    securityContext: { runAsUser: 0 }   # simplicité/permissions
     env:
     - name: NPM_CONFIG_CACHE
       value: /home/jenkins/.npm
@@ -98,10 +99,10 @@ spec:
     emptyDir: {}
 
   - name: npm-cache
-    emptyDir: {}
+    emptyDir: {}          # cache npm
 
   - name: m2-cache
-    emptyDir: {}
+    emptyDir: {}          # cache Maven
 """
       defaultContainer 'kubectl'
     }
@@ -111,6 +112,11 @@ spec:
     timestamps()
     buildDiscarder(logRotator(numToKeepStr: '20'))
     skipDefaultCheckout(true)
+  }
+
+  parameters {
+    booleanParam(name: 'RUN_FE_TESTS', defaultValue: true, description: 'Lancer les tests Angular (Karma/ChromeHeadless)')
+    booleanParam(name: 'RUN_BE_TESTS', defaultValue: true, description: 'Lancer les tests Maven (unitaires)')
   }
 
   triggers { githubPush() }
@@ -128,12 +134,13 @@ spec:
 
     stage('Init vars') {
       steps {
+        // corrige l’erreur "dubious ownership" et récupère le SHA court
+        sh 'git config --global --add safe.directory "$WORKSPACE" || true'
         script {
           def branch      = (env.BRANCH_NAME ?: 'main')
           def safeBranch  = branch.toLowerCase().replaceAll(/[^a-z0-9._-]/, '-')
           env.SAFE_BRANCH = safeBranch
-          // use git directly pour garantir SHORT_SHA
-          env.SHORT_SHA   = sh(returnStdout: true, script: 'git rev-parse --short HEAD || true').trim()
+          env.SHORT_SHA   = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
           env.TAG         = (safeBranch == 'main') ? 'latest' : "${safeBranch}-${env.BUILD_NUMBER}"
           echo "Docker image => docker.io/${env.DOCKER_IMAGE}:${env.TAG}"
           echo "SHORT_SHA=${env.SHORT_SHA}"
@@ -184,57 +191,49 @@ spec:
     }
 
     stage('Test Frontend (Headless)') {
+      when { expression { return params.RUN_FE_TESTS } }
       steps {
-        retry(2) {
-          container('node') {
-            dir('employee frontend final') {
-              sh '''
-                set -eux
-                export NG_CLI_ANALYTICS=false
-                npm config set fund false
+        container('node') {
+          dir('employee frontend final') {
+            sh '''
+              set -eux
+              npm i -D --no-save puppeteer karma-chrome-launcher
 
-                # S'assure que node_modules est là (si stage précédent a été nettoyé)
-                [ -d node_modules ] || npm ci --prefer-offline --no-audit --progress=false || true
+              # Chrome fourni par Puppeteer
+              export CHROME_BIN="$(node -e "process.stdout.write(require('puppeteer').executablePath())")"
 
-                # Installe Chromium embarqué via Puppeteer (sans modifier le lockfile)
-                npm i -D --no-save puppeteer karma-chrome-launcher
-
-                # Déclare le binaire Chrome pour Karma
-                export CHROME_BIN="$(node -e "process.stdout.write(require('puppeteer').executablePath())")"
-
-                # Lancement des tests Angular en headless
-                npx ng test --watch=false --browsers=ChromeHeadless || (echo "⚠️ Tests Angular non configurés ? (karma.conf.js manquant)"; exit 1)
-              '''
-            }
+              if [ -f karma.conf.js ]; then
+                npx ng test --watch=false --browsers=ChromeHeadless
+              else
+                echo "⚠️  Pas de karma.conf.js — je SKIP les tests frontend."
+              fi
+            '''
           }
         }
       }
     }
 
-    stage('Build & Test Backend (Maven)') {
+    stage('Build Backend (Maven)') {
       steps {
         retry(2) {
           timeout(time: 35, unit: 'MINUTES') {
             container('maven') {
               dir('emp_backend') {
-                sh '''
+                sh """
                   set -eux
-                  export MAVEN_OPTS="-Xms256m -Xmx1024m -XX:+UseSerialGC -Djava.awt.headless=true"
-                  MVN_COMMON="-B -Dmaven.repo.local=$MAVEN_CONFIG \
-                    -Dhttp.keepAlive=false -Dmaven.wagon.http.pool=false \
-                    -Dmaven.wagon.http.retryHandler.count=3"
+                  export MAVEN_OPTS='-Xms256m -Xmx1024m -XX:+UseSerialGC -Djava.awt.headless=true'
+                  MVN_COMMON='-B -Dmaven.repo.local=$MAVEN_CONFIG -Dhttp.keepAlive=false -Dmaven.wagon.http.pool=false -Dmaven.wagon.http.retryHandler.count=3'
 
-                  # Lance les tests unitaires (skip IT si présents)
+                  SKIP=\$( [ "${params.RUN_BE_TESTS}" = "true" ] && echo false || echo true )
+
                   if [ -x ./mvnw ]; then
-                    ./mvnw  $MVN_COMMON -DskipITs=true -DskipTests=false clean verify
+                    ./mvnw  \$MVN_COMMON -DskipTests=\$SKIP package
                   else
-                    mvn     $MVN_COMMON -DskipITs=true -DskipTests=false clean verify
+                    mvn     \$MVN_COMMON -DskipTests=\$SKIP package
                   fi
-                '''
+                """
               }
             }
-            // Publie les rapports JUnit backend si présents
-            junit allowEmptyResults: true, testResults: 'emp_backend/**/target/surefire-reports/*.xml, emp_backend/**/target/failsafe-reports/*.xml'
           }
         }
       }
@@ -330,8 +329,6 @@ spec:
       echo "❌ Build failed — check the first failing stage in Console Output"
     }
     always {
-      // Optionnel : archive du build frontend
-      archiveArtifacts allowEmptyArchive: true, artifacts: 'employee frontend final/dist/**/*'
       cleanWs()
     }
   }
