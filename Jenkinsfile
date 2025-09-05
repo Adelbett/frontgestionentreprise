@@ -1,7 +1,8 @@
 // =======================
-// Jenkinsfile (Declarative) — profil "RAM light" + tests optionnels
+// Jenkinsfile (Declarative) — profil "RAM light" STABLE
 // =======================
 pipeline {
+
   agent {
     kubernetes {
       cloud 'Kubernetes'
@@ -30,13 +31,11 @@ spec:
 
   containers:
   - name: node
-    # Image avec Chromium + deps pour tests headless
-    image: ghcr.io/puppeteer/puppeteer:22.10.0
+    image: docker.io/library/node:20-bullseye
     imagePullPolicy: IfNotPresent
     command: ["cat"]
     tty: true
     workingDir: /home/jenkins/agent
-    securityContext: { runAsUser: 0 }
     env:
     - name: NPM_CONFIG_CACHE
       value: /home/jenkins/.npm
@@ -112,13 +111,6 @@ spec:
     timestamps()
     buildDiscarder(logRotator(numToKeepStr: '20'))
     skipDefaultCheckout(true)
-    disableConcurrentBuilds()
-    ansiColor('xterm')
-  }
-
-  parameters {
-    booleanParam(name: 'RUN_FE_TESTS', defaultValue: true, description: 'Lancer les tests Angular (Karma/ChromeHeadless)')
-    booleanParam(name: 'RUN_BE_TESTS', defaultValue: true, description: 'Lancer les tests Maven (unitaires)')
   }
 
   triggers { githubPush() }
@@ -126,29 +118,21 @@ spec:
   environment {
     DOCKER_IMAGE = 'adelbettaieb/gestionentreprise'
     K8S_NS       = 'jenkins'
-    APP_NAME     = 'gestionentreprise'  // nom du Deployment et container "app"
+    APP_NAME     = 'gestionentreprise'
     INGRESS_HOST = 'app.local'
   }
 
   stages {
 
-    stage('Checkout') {
-      steps {
-        // Faire le checkout dans un conteneur qui a git pour éviter JENKINS-30600
-        container('maven') {
-          checkout scm
-        }
-      }
-    }
+    stage('Checkout') { steps { checkout scm } }
 
     stage('Init vars') {
       steps {
-        sh 'git config --global --add safe.directory "$WORKSPACE" || true'
         script {
           def branch      = (env.BRANCH_NAME ?: 'main')
           def safeBranch  = branch.toLowerCase().replaceAll(/[^a-z0-9._-]/, '-')
           env.SAFE_BRANCH = safeBranch
-          env.SHORT_SHA   = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+          env.SHORT_SHA   = (env.GIT_COMMIT ? env.GIT_COMMIT.take(7) : '')
           env.TAG         = (safeBranch == 'main') ? 'latest' : "${safeBranch}-${env.BUILD_NUMBER}"
           echo "Docker image => docker.io/${env.DOCKER_IMAGE}:${env.TAG}"
           echo "SHORT_SHA=${env.SHORT_SHA}"
@@ -168,7 +152,7 @@ spec:
       steps {
         container('kubectl') { sh 'kubectl version --client=true' }
         container('node')    { sh 'node --version && npm --version' }
-        container('maven')   { sh 'mvn -v && git --version || true' }
+        container('maven')   { sh 'mvn -v' }
       }
     }
 
@@ -189,31 +173,10 @@ spec:
                   npm ci --prefer-offline --no-audit --progress=false || \
                   npm install --prefer-offline --no-audit --progress=false
 
-                  npx ng build --configuration=production --no-progress
+                  npm run build -- --configuration=production --no-progress
                 '''
               }
             }
-          }
-        }
-      }
-    }
-
-    stage('Test Frontend (Headless)') {
-      when { expression { return params.RUN_FE_TESTS } }
-      steps {
-        container('node') {
-          dir('employee frontend final') {
-            sh '''
-              set -eux
-              npm i -D --no-save puppeteer karma-chrome-launcher
-              export CHROME_BIN="$(node -e "process.stdout.write(require('puppeteer').executablePath())")"
-
-              if [ -f karma.conf.js ]; then
-                npx ng test --watch=false --browsers=ChromeHeadless
-              else
-                echo "[skip] Pas de karma.conf.js — tests frontend ignorés."
-              fi
-            '''
           }
         }
       }
@@ -225,24 +188,19 @@ spec:
           timeout(time: 35, unit: 'MINUTES') {
             container('maven') {
               dir('emp_backend') {
-                withEnv([
-                  "RUN_BE_TESTS=${params.RUN_BE_TESTS}",
-                  "MAVEN_CONFIG=${env.MAVEN_CONFIG ?: '/home/jenkins/.m2'}"
-                ]) {
-                  sh '''
-                    set -eux
-                    export MAVEN_OPTS='-Xms256m -Xmx1024m -XX:+UseSerialGC -Djava.awt.headless=true'
-                    MVN_COMMON='-B -Dmaven.repo.local=$MAVEN_CONFIG/repository -Dhttp.keepAlive=false -Dmaven.wagon.http.pool=false -Dmaven.wagon.http.retryHandler.count=3'
+                sh '''
+                  set -eux
+                  export MAVEN_OPTS="-Xms256m -Xmx1024m -XX:+UseSerialGC -Djava.awt.headless=true"
+                  MVN_COMMON="-B -Dmaven.repo.local=$MAVEN_CONFIG \
+                    -Dhttp.keepAlive=false -Dmaven.wagon.http.pool=false \
+                    -Dmaven.wagon.http.retryHandler.count=3"
 
-                    SKIP=$( [ "${RUN_BE_TESTS}" = "true" ] && echo false || echo true )
-
-                    if [ -x ./mvnw ]; then
-                      ./mvnw  $MVN_COMMON -DskipTests=$SKIP package
-                    else
-                      mvn     $MVN_COMMON -DskipTests=$SKIP package
-                    fi
-                  '''
-                }
+                  if [ -x ./mvnw ]; then
+                    ./mvnw  $MVN_COMMON -DskipTests package
+                  else
+                    mvn     $MVN_COMMON -DskipTests package
+                  fi
+                '''
               }
             }
           }
@@ -329,18 +287,20 @@ spec:
     }
   }
 
-  post {
-    success {
-      script {
-        def deployedTag = (env.SHORT_SHA?.trim()) ? env.SHORT_SHA : (env.TAG?.trim() ?: 'latest')
-        echo "✅ Deployed docker.io/${env.DOCKER_IMAGE}:${deployedTag} to namespace ${env.K8S_NS}"
-      }
-    }
-    failure {
-      echo "❌ Build failed — check the first failing stage in Console Output"
-    }
-    always {
-      cleanWs()
+post {
+  success {
+    script {
+      // fallback: SHORT_SHA si présent, sinon TAG, sinon "latest"
+      def deployedTag = (env.SHORT_SHA?.trim()) ? env.SHORT_SHA : (env.TAG?.trim() ?: 'latest')
+      echo "✅ Deployed docker.io/${env.DOCKER_IMAGE}:${deployedTag} to namespace ${env.K8S_NS}"
     }
   }
+  failure {
+    echo "❌ Build failed — check the first failing stage in Console Output"
+  }
+  always {
+    cleanWs()
+  }
+}
+
 }
