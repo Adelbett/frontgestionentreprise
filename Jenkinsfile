@@ -36,7 +36,7 @@ spec:
     command: ["cat"]
     tty: true
     workingDir: /home/jenkins/agent
-    securityContext: { runAsUser: 0 }   # simplicité/permissions
+    securityContext: { runAsUser: 0 }
     env:
     - name: NPM_CONFIG_CACHE
       value: /home/jenkins/.npm
@@ -112,6 +112,8 @@ spec:
     timestamps()
     buildDiscarder(logRotator(numToKeepStr: '20'))
     skipDefaultCheckout(true)
+    disableConcurrentBuilds()
+    ansiColor('xterm')
   }
 
   parameters {
@@ -124,17 +126,23 @@ spec:
   environment {
     DOCKER_IMAGE = 'adelbettaieb/gestionentreprise'
     K8S_NS       = 'jenkins'
-    APP_NAME     = 'gestionentreprise'
+    APP_NAME     = 'gestionentreprise'  // nom du Deployment et container "app"
     INGRESS_HOST = 'app.local'
   }
 
   stages {
 
-    stage('Checkout') { steps { checkout scm } }
+    stage('Checkout') {
+      steps {
+        // Faire le checkout dans un conteneur qui a git pour éviter JENKINS-30600
+        container('maven') {
+          checkout scm
+        }
+      }
+    }
 
     stage('Init vars') {
       steps {
-        // corrige l’erreur "dubious ownership" et récupère le SHA court
         sh 'git config --global --add safe.directory "$WORKSPACE" || true'
         script {
           def branch      = (env.BRANCH_NAME ?: 'main')
@@ -160,7 +168,7 @@ spec:
       steps {
         container('kubectl') { sh 'kubectl version --client=true' }
         container('node')    { sh 'node --version && npm --version' }
-        container('maven')   { sh 'mvn -v' }
+        container('maven')   { sh 'mvn -v && git --version || true' }
       }
     }
 
@@ -198,14 +206,12 @@ spec:
             sh '''
               set -eux
               npm i -D --no-save puppeteer karma-chrome-launcher
-
-              # Chrome fourni par Puppeteer
               export CHROME_BIN="$(node -e "process.stdout.write(require('puppeteer').executablePath())")"
 
               if [ -f karma.conf.js ]; then
                 npx ng test --watch=false --browsers=ChromeHeadless
               else
-                echo "⚠️  Pas de karma.conf.js — je SKIP les tests frontend."
+                echo "[skip] Pas de karma.conf.js — tests frontend ignorés."
               fi
             '''
           }
@@ -219,19 +225,24 @@ spec:
           timeout(time: 35, unit: 'MINUTES') {
             container('maven') {
               dir('emp_backend') {
-                sh """
-                  set -eux
-                  export MAVEN_OPTS='-Xms256m -Xmx1024m -XX:+UseSerialGC -Djava.awt.headless=true'
-                  MVN_COMMON='-B -Dmaven.repo.local=$MAVEN_CONFIG -Dhttp.keepAlive=false -Dmaven.wagon.http.pool=false -Dmaven.wagon.http.retryHandler.count=3'
+                withEnv([
+                  "RUN_BE_TESTS=${params.RUN_BE_TESTS}",
+                  "MAVEN_CONFIG=${env.MAVEN_CONFIG ?: '/home/jenkins/.m2'}"
+                ]) {
+                  sh '''
+                    set -eux
+                    export MAVEN_OPTS='-Xms256m -Xmx1024m -XX:+UseSerialGC -Djava.awt.headless=true'
+                    MVN_COMMON='-B -Dmaven.repo.local=$MAVEN_CONFIG/repository -Dhttp.keepAlive=false -Dmaven.wagon.http.pool=false -Dmaven.wagon.http.retryHandler.count=3'
 
-                  SKIP=\$( [ "${params.RUN_BE_TESTS}" = "true" ] && echo false || echo true )
+                    SKIP=$( [ "${RUN_BE_TESTS}" = "true" ] && echo false || echo true )
 
-                  if [ -x ./mvnw ]; then
-                    ./mvnw  \$MVN_COMMON -DskipTests=\$SKIP package
-                  else
-                    mvn     \$MVN_COMMON -DskipTests=\$SKIP package
-                  fi
-                """
+                    if [ -x ./mvnw ]; then
+                      ./mvnw  $MVN_COMMON -DskipTests=$SKIP package
+                    else
+                      mvn     $MVN_COMMON -DskipTests=$SKIP package
+                    fi
+                  '''
+                }
               }
             }
           }
