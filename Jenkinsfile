@@ -1,5 +1,5 @@
 // =======================
-// Jenkinsfile (Declarative) — profil "RAM light" STABLE
+// Jenkinsfile — Tests + Build + Push + Deploy (+ Smoke test)
 // =======================
 pipeline {
 
@@ -98,10 +98,10 @@ spec:
     emptyDir: {}
 
   - name: npm-cache
-    emptyDir: {}          # cache npm
+    emptyDir: {}
 
   - name: m2-cache
-    emptyDir: {}          # cache Maven
+    emptyDir: {}
 """
       defaultContainer 'kubectl'
     }
@@ -132,7 +132,8 @@ spec:
           def branch      = (env.BRANCH_NAME ?: 'main')
           def safeBranch  = branch.toLowerCase().replaceAll(/[^a-z0-9._-]/, '-')
           env.SAFE_BRANCH = safeBranch
-          env.SHORT_SHA   = (env.GIT_COMMIT ? env.GIT_COMMIT.take(7) : '')
+          // use git directly pour garantir SHORT_SHA
+          env.SHORT_SHA   = sh(returnStdout: true, script: 'git rev-parse --short HEAD || true').trim()
           env.TAG         = (safeBranch == 'main') ? 'latest' : "${safeBranch}-${env.BUILD_NUMBER}"
           echo "Docker image => docker.io/${env.DOCKER_IMAGE}:${env.TAG}"
           echo "SHORT_SHA=${env.SHORT_SHA}"
@@ -173,7 +174,7 @@ spec:
                   npm ci --prefer-offline --no-audit --progress=false || \
                   npm install --prefer-offline --no-audit --progress=false
 
-                  npm run build -- --configuration=production --no-progress
+                  npx ng build --configuration=production --no-progress
                 '''
               }
             }
@@ -182,7 +183,35 @@ spec:
       }
     }
 
-    stage('Build Backend (Maven)') {
+    stage('Test Frontend (Headless)') {
+      steps {
+        retry(2) {
+          container('node') {
+            dir('employee frontend final') {
+              sh '''
+                set -eux
+                export NG_CLI_ANALYTICS=false
+                npm config set fund false
+
+                # S'assure que node_modules est là (si stage précédent a été nettoyé)
+                [ -d node_modules ] || npm ci --prefer-offline --no-audit --progress=false || true
+
+                # Installe Chromium embarqué via Puppeteer (sans modifier le lockfile)
+                npm i -D --no-save puppeteer karma-chrome-launcher
+
+                # Déclare le binaire Chrome pour Karma
+                export CHROME_BIN="$(node -e "process.stdout.write(require('puppeteer').executablePath())")"
+
+                # Lancement des tests Angular en headless
+                npx ng test --watch=false --browsers=ChromeHeadless || (echo "⚠️ Tests Angular non configurés ? (karma.conf.js manquant)"; exit 1)
+              '''
+            }
+          }
+        }
+      }
+    }
+
+    stage('Build & Test Backend (Maven)') {
       steps {
         retry(2) {
           timeout(time: 35, unit: 'MINUTES') {
@@ -195,14 +224,17 @@ spec:
                     -Dhttp.keepAlive=false -Dmaven.wagon.http.pool=false \
                     -Dmaven.wagon.http.retryHandler.count=3"
 
+                  # Lance les tests unitaires (skip IT si présents)
                   if [ -x ./mvnw ]; then
-                    ./mvnw  $MVN_COMMON -DskipTests package
+                    ./mvnw  $MVN_COMMON -DskipITs=true -DskipTests=false clean verify
                   else
-                    mvn     $MVN_COMMON -DskipTests package
+                    mvn     $MVN_COMMON -DskipITs=true -DskipTests=false clean verify
                   fi
                 '''
               }
             }
+            // Publie les rapports JUnit backend si présents
+            junit allowEmptyResults: true, testResults: 'emp_backend/**/target/surefire-reports/*.xml, emp_backend/**/target/failsafe-reports/*.xml'
           }
         }
       }
@@ -287,20 +319,20 @@ spec:
     }
   }
 
-post {
-  success {
-    script {
-      // fallback: SHORT_SHA si présent, sinon TAG, sinon "latest"
-      def deployedTag = (env.SHORT_SHA?.trim()) ? env.SHORT_SHA : (env.TAG?.trim() ?: 'latest')
-      echo "✅ Deployed docker.io/${env.DOCKER_IMAGE}:${deployedTag} to namespace ${env.K8S_NS}"
+  post {
+    success {
+      script {
+        def deployedTag = (env.SHORT_SHA?.trim()) ? env.SHORT_SHA : (env.TAG?.trim() ?: 'latest')
+        echo "✅ Deployed docker.io/${env.DOCKER_IMAGE}:${deployedTag} to namespace ${env.K8S_NS}"
+      }
+    }
+    failure {
+      echo "❌ Build failed — check the first failing stage in Console Output"
+    }
+    always {
+      // Optionnel : archive du build frontend
+      archiveArtifacts allowEmptyArchive: true, artifacts: 'employee frontend final/dist/**/*'
+      cleanWs()
     }
   }
-  failure {
-    echo "❌ Build failed — check the first failing stage in Console Output"
-  }
-  always {
-    cleanWs()
-  }
-}
-
 }
