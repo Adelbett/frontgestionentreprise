@@ -127,7 +127,21 @@ spec:
 
   stages {
 
-    stage('Checkout') { steps { checkout scm } }
+stage('Checkout') {
+  steps {
+    timeout(time: 5, unit: 'MINUTES') {
+      retry(2) {
+        checkout([$class: 'GitSCM',
+          branches: [[name: '*/main']],
+          userRemoteConfigs: [[url: 'https://github.com/Adelbett/frontgestionentreprise.git', credentialsId: 'token_github']],
+          extensions: [
+            [$class: 'CloneOption', shallow: true, depth: 1, noTags: true, honorRefspec: true]
+          ]
+        ])
+      }
+    }
+  }
+}
 
     stage('Init vars') {
       steps {
