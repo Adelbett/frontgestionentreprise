@@ -1,5 +1,5 @@
 // =======================
-// Jenkinsfile (Declarative) — profil "RAM light" + TESTS
+// Jenkinsfile (Declarative) — profil "RAM light" + tests Karma headless
 // =======================
 pipeline {
 
@@ -36,7 +36,6 @@ spec:
     command: ["cat"]
     tty: true
     workingDir: /home/jenkins/agent
-    securityContext: { runAsUser: 0 }   # pour apt-get (Chromium)
     env:
     - name: NPM_CONFIG_CACHE
       value: /home/jenkins/.npm
@@ -157,57 +156,7 @@ spec:
       }
     }
 
-    // ---------- TESTS FRONTEND ----------
-    stage('Install Chromium (for Karma)') {
-      steps {
-        container('node') {
-          sh '''
-            set -eux
-            if ! command -v chromium >/dev/null 2>&1 && ! command -v chromium-browser >/dev/null 2>&1; then
-              apt-get update
-              DEBIAN_FRONTEND=noninteractive apt-get install -y chromium fonts-liberation
-              apt-get clean
-              rm -rf /var/lib/apt/lists/*
-            fi
-            command -v chromium || command -v chromium-browser
-          '''
-        }
-      }
-    }
-
-    stage('Test Frontend') {
-      steps {
-        retry(2) {
-          timeout(time: 25, unit: 'MINUTES') {
-            container('node') {
-              dir('employee frontend final') {
-                sh '''
-                  set -eux
-                  export NG_CLI_ANALYTICS=false
-                  export CI=true
-                  export NODE_OPTIONS="--max-old-space-size=1536"
-
-                  npm ci --prefer-offline --no-audit --progress=false || \
-                  npm install --prefer-offline --no-audit --progress=false
-
-                  export CHROME_BIN="$(command -v chromium || command -v chromium-browser || true)"
-
-                  npm run test -- --watch=false --browsers=ChromeHeadlessNoSandbox --no-progress --code-coverage
-                '''
-              }
-            }
-          }
-        }
-      }
-      post {
-        always {
-          junit allowEmptyResults: true, testResults: 'employee frontend final/**/junit/**/*.xml'
-          archiveArtifacts artifacts: 'employee frontend final/**/coverage/**/*', allowEmptyArchive: true
-        }
-      }
-    }
-
-    // ---------- BUILD FRONTEND ----------
+    // ---- FRONTEND BUILD (Angular) ----
     stage('Build Frontend') {
       steps {
         retry(2) {
@@ -234,25 +183,52 @@ spec:
       }
     }
 
-    // ---------- TESTS BACKEND ----------
-    stage('Test Backend (Maven)') {
+    // Installe Chromium dans le conteneur Node (pour Karma headless)
+    stage('Install Chromium (for Karma)') {
+      steps {
+        container('node') {
+          sh '''
+            set -eux
+            apt-get update
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+              chromium ca-certificates libnss3 libgbm1 libgtk-3-0 libatk-bridge2.0-0 \
+              libasound2 fonts-liberation xdg-utils
+            apt-get clean
+            rm -rf /var/lib/apt/lists/*
+
+            export CHROME_BIN="$(command -v chromium || command -v chromium-browser)"
+            echo "CHROME_BIN=$CHROME_BIN"
+            $CHROME_BIN --version
+          '''
+        }
+      }
+    }
+
+    // Tests Karma en headless avec le launcher custom
+    stage('Test Frontend') {
       steps {
         retry(2) {
           timeout(time: 25, unit: 'MINUTES') {
-            container('maven') {
-              dir('emp_backend') {
+            container('node') {
+              dir('employee frontend final') {
                 sh '''
                   set -eux
-                  export MAVEN_OPTS="-Xms256m -Xmx1024m -Djava.awt.headless=true -XX:+UseSerialGC"
-                  MVN_COMMON="-B -Dmaven.repo.local=$MAVEN_CONFIG \
-                    -Dhttp.keepAlive=false -Dmaven.wagon.http.pool=false \
-                    -Dmaven.wagon.http.retryHandler.count=3"
+                  export NG_CLI_ANALYTICS=false
+                  export CI=true
+                  export NODE_OPTIONS="--max-old-space-size=1536"
 
-                  if [ -x ./mvnw ]; then
-                    ./mvnw  $MVN_COMMON -DskipTests=false test
-                  else
-                    mvn     $MVN_COMMON -DskipTests=false test
-                  fi
+                  # s'assurer que le launcher est présent
+                  npm ls karma-chrome-launcher || npm i -D karma-chrome-launcher
+
+                  export CHROME_BIN="$(command -v chromium || command -v chromium-browser)"
+                  echo "Using CHROME_BIN=$CHROME_BIN"
+                  "$CHROME_BIN" --version
+
+                  npm run test -- \
+                    --watch=false \
+                    --browsers=ChromeHeadlessNoSandbox \
+                    --no-progress \
+                    --code-coverage
                 '''
               }
             }
@@ -261,12 +237,13 @@ spec:
       }
       post {
         always {
-          junit allowEmptyResults: true, testResults: 'emp_backend/**/surefire-reports/*.xml'
+          junit allowEmptyResults: true, testResults: 'employee frontend final/**/junit/**/*.xml'
+          archiveArtifacts artifacts: 'employee frontend final/**/coverage/**/*', allowEmptyArchive: true
         }
       }
     }
 
-    // ---------- BUILD BACKEND ----------
+    // ---- BACKEND BUILD (Maven) ----
     stage('Build Backend (Maven)') {
       steps {
         retry(2) {
@@ -275,7 +252,7 @@ spec:
               dir('emp_backend') {
                 sh '''
                   set -eux
-                  export MAVEN_OPTS="-Xms256m -Xmx1024m -Djava.awt.headless=true -XX:+UseSerialGC"
+                  export MAVEN_OPTS="-Xms256m -Xmx1024m -XX:+UseSerialGC -Djava.awt.headless=true"
                   MVN_COMMON="-B -Dmaven.repo.local=$MAVEN_CONFIG \
                     -Dhttp.keepAlive=false -Dmaven.wagon.http.pool=false \
                     -Dmaven.wagon.http.retryHandler.count=3"
@@ -293,7 +270,7 @@ spec:
       }
     }
 
-    // ---------- IMAGE ----------
+    // ---- IMAGE DOCKER (Kaniko) ----
     stage('Build & Push Image (Kaniko)') {
       steps {
         retry(2) {
@@ -338,7 +315,7 @@ spec:
       }
     }
 
-    // ---------- DEPLOY ----------
+    // ---- DEPLOY ----
     stage('Deploy to Kubernetes') {
       steps {
         retry(2) {
@@ -358,7 +335,7 @@ spec:
       }
     }
 
-    // ---------- SMOKE ----------
+    // ---- SMOKE TEST ----
     stage('Smoke Test (Ingress)') {
       steps {
         retry(2) {
