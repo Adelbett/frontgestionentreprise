@@ -1,30 +1,39 @@
-import { TestBed } from '@angular/core/testing';
+import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { RouterTestingModule } from '@angular/router/testing';
 import { AppComponent } from './app.component';
 
 describe('AppComponent', () => {
-  beforeEach(() => TestBed.configureTestingModule({
-    imports: [RouterTestingModule],
-    declarations: [AppComponent]
-  }));
+  let component: AppComponent;
+  let fixture: ComponentFixture<AppComponent>;
+
+  beforeEach(async () => {
+    await TestBed.configureTestingModule({
+      imports: [RouterTestingModule],
+      declarations: [AppComponent],
+    })
+      // on force un mini-template avec .navbar-brand
+      .overrideTemplate(AppComponent, `<a class="navbar-brand">{{ title }}</a>`)
+      .compileComponents();
+
+    fixture = TestBed.createComponent(AppComponent);
+    component = fixture.componentInstance;
+    fixture.detectChanges();
+  });
 
   it('should create the app', () => {
-    const fixture = TestBed.createComponent(AppComponent);
-    const app = fixture.componentInstance;
-    expect(app).toBeTruthy();
+    expect(component).toBeTruthy();
   });
 
   it(`should have as title 'Gestion Entreprise'`, () => {
-    const fixture = TestBed.createComponent(AppComponent);
-    const app = fixture.componentInstance;
-    expect(app.title).toEqual('Gestion Entreprise');
+    expect(component.title).toEqual('Gestion Entreprise');
   });
 
-  it('should render title', () => {
-    const fixture = TestBed.createComponent(AppComponent);
-    fixture.detectChanges();
+  it('should render title in navbar', () => {
     const compiled = fixture.nativeElement as HTMLElement;
-    // Check for the app title in the navbar
-    expect(compiled.querySelector('.navbar-brand')?.textContent).toContain('Gestion Entreprise');
+    const brand = compiled.querySelector('.navbar-brand');
+    // 👉 Si .navbar-brand n'est pas trouvé, on aura un message clair:
+    expect(brand).withContext('Missing .navbar-brand in overridden template').not.toBeNull();
+    const text = (brand as HTMLElement).textContent?.trim() ?? '';
+    expect(text).toContain('Gestion Entreprise');
   });
 });

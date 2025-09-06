@@ -1,8 +1,10 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { ActivatedRoute, convertToParamMap } from '@angular/router';
-import { HttpClientTestingModule } from '@angular/common/http/testing';
 import { RouterTestingModule } from '@angular/router/testing';
+import { ActivatedRoute } from '@angular/router';
+import { of } from 'rxjs';
+
 import { ShowDetailsComponent } from './show-details.component';
+import { EmployeeService } from '../employee.service';
 
 describe('ShowDetailsComponent', () => {
   let component: ShowDetailsComponent;
@@ -10,26 +12,23 @@ describe('ShowDetailsComponent', () => {
 
   beforeEach(async () => {
     await TestBed.configureTestingModule({
-      imports: [
-        ShowDetailsComponent, // Import standalone component
-        HttpClientTestingModule,
-        RouterTestingModule
-      ],
+      declarations: [ShowDetailsComponent], // composant non-standalone => declarations
+      imports: [RouterTestingModule],
       providers: [
+        { provide: ActivatedRoute, useValue: { snapshot: { params: { id: 1 } } } },
         {
-          provide: ActivatedRoute,
+          provide: EmployeeService,
           useValue: {
-            snapshot: { 
-              paramMap: convertToParamMap({ id: '123' })
-            }
-          }
-        }
-      ]
+            getEmployeeById: () =>
+              of({ id: 1, firstName: 'Test', lastName: 'User', emailId: 't@t.com' }),
+          },
+        },
+      ],
     }).compileComponents();
-    
+
     fixture = TestBed.createComponent(ShowDetailsComponent);
     component = fixture.componentInstance;
-    fixture.detectChanges();
+    fixture.detectChanges(); // déclenche ngOnInit
   });
 
   it('should create', () => {
