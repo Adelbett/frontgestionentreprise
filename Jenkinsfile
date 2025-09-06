@@ -1,5 +1,5 @@
 // =======================
-// Jenkinsfile (Declarative) — profil "RAM light" + tests Karma headless
+// Jenkinsfile (Declarative) — CI/CD: main->dev (auto) | tag->prod (approval)
 // =======================
 pipeline {
 
@@ -116,10 +116,13 @@ spec:
   triggers { githubPush() }
 
   environment {
-    DOCKER_IMAGE = 'adelbettaieb/gestionentreprise'
-    K8S_NS       = 'jenkins'
-    APP_NAME     = 'gestionentreprise'
-    INGRESS_HOST = 'app.local'
+    DOCKER_IMAGE       = 'adelbettaieb/gestionentreprise'
+    K8S_NS             = 'jenkins'     // dev namespace
+    APP_NAME           = 'gestionentreprise'
+    INGRESS_HOST       = 'app.local'   // dev ingress host
+
+    PROD_NS            = 'prod'        // <- ajuste si besoin
+    PROD_INGRESS_HOST  = 'app.prod.local'
   }
 
   stages {
@@ -132,10 +135,14 @@ spec:
           def branch      = (env.BRANCH_NAME ?: 'main')
           def safeBranch  = branch.toLowerCase().replaceAll(/[^a-z0-9._-]/, '-')
           env.SAFE_BRANCH = safeBranch
-          env.SHORT_SHA   = (env.GIT_COMMIT ? env.GIT_COMMIT.take(7) : '')
+          env.SHORT_SHA   = (env.GIT_COMMIT ? env.GIT_COMMIT.take(8) : '')
           env.TAG         = (safeBranch == 'main') ? 'latest' : "${safeBranch}-${env.BUILD_NUMBER}"
+
+          // utile pour stages "buildingTag()"
+          env.GIT_TAG = sh(script: 'git describe --tags --exact-match 2>/dev/null || true', returnStdout: true).trim()
+
           echo "Docker image => docker.io/${env.DOCKER_IMAGE}:${env.TAG}"
-          echo "SHORT_SHA=${env.SHORT_SHA}"
+          echo "SHORT_SHA=${env.SHORT_SHA}  GIT_TAG=${env.GIT_TAG}"
         }
       }
     }
@@ -198,13 +205,13 @@ spec:
 
             export CHROME_BIN="$(command -v chromium || command -v chromium-browser)"
             echo "CHROME_BIN=$CHROME_BIN"
-            $CHROME_BIN --version
+            "$CHROME_BIN" --version
           '''
         }
       }
     }
 
-    // Tests Karma en headless avec le launcher custom
+    // Tests Karma en headless + JUnit + lcov
     stage('Test Frontend') {
       steps {
         retry(2) {
@@ -217,14 +224,37 @@ spec:
                   export CI=true
                   export NODE_OPTIONS="--max-old-space-size=1536"
 
-                  # s'assurer que le launcher est présent
-                  npm ls karma-chrome-launcher || npm i -D karma-chrome-launcher
+                  # s'assurer que les reporters sont présents
+                  npm i -D karma-junit-reporter karma-coverage >/dev/null 2>&1 || true
+
+                  # fichier de conf CI qui étend la conf existante pour ajouter les reporters
+                  cat > karma.ci.conf.js <<'EOF'
+                  const base = require('./karma.conf.js');
+                  module.exports = function(config) {
+                    base(config);
+                    const reporters = (config.reporters || ['progress']).slice();
+                    if (!reporters.includes('junit')) reporters.push('junit');
+                    if (!reporters.includes('coverage')) reporters.push('coverage');
+                    config.set({
+                      reporters,
+                      junitReporter: {
+                        outputDir: 'test-results/karma',
+                        outputFile: 'karma-tests.xml',
+                        useBrowserName: false
+                      },
+                      coverageReporter: {
+                        dir: 'coverage',
+                        reporters: [{ type: 'lcovonly', subdir: '.' }, { type: 'text-summary' }]
+                      }
+                    });
+                  };
+                  EOF
 
                   export CHROME_BIN="$(command -v chromium || command -v chromium-browser)"
                   echo "Using CHROME_BIN=$CHROME_BIN"
                   "$CHROME_BIN" --version
 
-                  npm run test -- \
+                  ./node_modules/.bin/ng test --karma-config=karma.ci.conf.js \
                     --watch=false \
                     --browsers=ChromeHeadlessNoSandbox \
                     --no-progress \
@@ -235,27 +265,29 @@ spec:
           }
         }
       }
-post {
-  always {
-    // On se place dans le dossier du frontend (gère bien l'espace)
-    dir('employee frontend final') {
-      // (optionnel) petit listing pour debug
-      sh '''
-        echo "Workspace: $(pwd)"
-        ls -lah test-results || true
-        head -n 5 test-results/*.xml || true
-      '''
+      post {
+        always {
+          dir('employee frontend final') {
+            sh '''
+              echo "Workspace: $(pwd)"
+              ls -lah test-results || true
+              head -n 5 test-results/*.xml || true
+            '''
+            // Publie les rapports JUnit produits par Karma
+            junit allowEmptyResults: true, testResults: 'test-results/karma/*.xml'
 
-      // Publie les rapports JUnit produits par Karma
-      junit allowEmptyResults: true, testResults: 'test-results/*.xml'
-
-      // Archive la couverture
-      archiveArtifacts artifacts: 'coverage/**', allowEmptyArchive: true
-    }
-  }
-}
-
-
+            // Publie la couverture lcov si le plugin est là, sinon archive
+            script {
+              try {
+                publishCoverage adapters: [ lcov(lcovFile: "employee frontend final/coverage/lcov.info") ]
+              } catch (e) {
+                echo "publishCoverage non dispo, on archive la couverture: ${e}"
+                archiveArtifacts artifacts: 'coverage/**', allowEmptyArchive: true
+              }
+            }
+          }
+        }
+      }
     }
 
     // ---- BACKEND BUILD (Maven) ----
@@ -285,8 +317,38 @@ post {
       }
     }
 
+    // ---- BACKEND TESTS (Maven) ----
+    stage('Test Backend (Maven)') {
+      steps {
+        retry(2) {
+          container('maven') {
+            dir('emp_backend') {
+              sh '''
+                set -eux
+                export MAVEN_OPTS="-Xms256m -Xmx1024m -Djava.awt.headless=true"
+                MVN_COMMON="-B -Dmaven.repo.local=$MAVEN_CONFIG"
+
+                if [ -x ./mvnw ]; then
+                  ./mvnw $MVN_COMMON test
+                else
+                  mvn    $MVN_COMMON test
+                fi
+              '''
+            }
+          }
+        }
+      }
+      post {
+        always {
+          junit allowEmptyResults: true, testResults: 'emp_backend/target/surefire-reports/*.xml'
+          archiveArtifacts artifacts: 'emp_backend/target/*.jar', allowEmptyArchive: true
+        }
+      }
+    }
+
     // ---- IMAGE DOCKER (Kaniko) ----
     stage('Build & Push Image (Kaniko)') {
+      when { anyOf { branch 'main'; buildingTag() } }
       steps {
         retry(2) {
           timeout(time: 30, unit: 'MINUTES') {
@@ -315,12 +377,14 @@ post {
                     --snapshot-mode=redo --verbosity=info
                 fi
 
-                if [ -n "${SAFE_BRANCH:-}" ] && [ "$SAFE_BRANCH" != "main" ]; then
-                  echo ">> Also push branch tag: $SAFE_BRANCH"
+                # si build déclenché par un tag Git, publier aussi le tag version
+                GIT_TAG="$(git describe --tags --exact-match 2>/dev/null || true)"
+                if [ -n "$GIT_TAG" ]; then
+                  echo ">> Also push release tag: $GIT_TAG"
                   /kaniko/executor \
                     --context "$CONTEXT_DIR" \
                     --dockerfile "$DOCKERFILE" \
-                    --destination "docker.io/$DOCKER_IMAGE:$SAFE_BRANCH" \
+                    --destination "docker.io/$DOCKER_IMAGE:$GIT_TAG" \
                     --snapshot-mode=redo --verbosity=info
                 fi
               '''
@@ -330,8 +394,9 @@ post {
       }
     }
 
-    // ---- DEPLOY ----
-    stage('Deploy to Kubernetes') {
+    // ---- DEPLOY DEV (main) ----
+    stage('Deploy to Kubernetes (dev)') {
+      when { allOf { branch 'main'; not { buildingTag() } } }
       steps {
         retry(2) {
           container('kubectl') {
@@ -341,7 +406,7 @@ post {
               kubectl -n "$K8S_NS" apply -f "$WORKSPACE/k8s"
 
               DEPLOY_TAG="${SHORT_SHA:-$TAG}"
-              echo "Deploying docker.io/$DOCKER_IMAGE:$DEPLOY_TAG"
+              echo "Deploying docker.io/$DOCKER_IMAGE:$DEPLOY_TAG to ns=$K8S_NS"
               kubectl -n "$K8S_NS" set image deploy/$APP_NAME app="docker.io/$DOCKER_IMAGE:$DEPLOY_TAG"
               kubectl -n "$K8S_NS" rollout status deploy/$APP_NAME --timeout=420s
             '''
@@ -350,8 +415,8 @@ post {
       }
     }
 
-    // ---- SMOKE TEST ----
-    stage('Smoke Test (Ingress)') {
+    stage('Smoke Test (dev Ingress)') {
+      when { allOf { branch 'main'; not { buildingTag() } } }
       steps {
         retry(2) {
           container('kubectl') {
@@ -365,13 +430,59 @@ post {
         }
       }
     }
+
+    // ---- APPROVAL & DEPLOY PROD (tag) ----
+    stage('Approve PROD deploy') {
+      when { buildingTag() }
+      steps {
+        input message: "Déployer le tag ${env.GIT_TAG ?: env.BRANCH_NAME} en PROD (${env.PROD_NS}) ?", ok: 'Déployer'
+      }
+    }
+
+    stage('Deploy to Kubernetes (prod)') {
+      when { buildingTag() }
+      steps {
+        retry(2) {
+          container('kubectl') {
+            sh '''
+              set -eux
+              test -d "$WORKSPACE/k8s"
+              kubectl -n "$PROD_NS" apply -f "$WORKSPACE/k8s"
+
+              REL_TAG="${GIT_TAG:-$SHORT_SHA}"
+              echo "Deploying docker.io/$DOCKER_IMAGE:$REL_TAG to ns=$PROD_NS"
+              kubectl -n "$PROD_NS" set image deploy/$APP_NAME app="docker.io/$DOCKER_IMAGE:$REL_TAG"
+              kubectl -n "$PROD_NS" rollout status deploy/$APP_NAME --timeout=600s
+            '''
+          }
+        }
+      }
+    }
+
+    stage('Smoke Test (prod Ingress)') {
+      when { buildingTag() }
+      steps {
+        retry(2) {
+          container('kubectl') {
+            sh '''
+              set -eux
+              kubectl -n "$PROD_NS" run smoke --rm -i --restart=Never --image=curlimages/curl -- \
+                -sSI -H "Host: $PROD_INGRESS_HOST" \
+                http://ingress-nginx-controller.ingress-nginx.svc.cluster.local/ | head -n1
+            '''
+          }
+        }
+      }
+    }
   }
 
   post {
     success {
       script {
-        def deployedTag = (env.SHORT_SHA?.trim()) ? env.SHORT_SHA : (env.TAG?.trim() ?: 'latest')
-        echo "✅ Deployed docker.io/${env.DOCKER_IMAGE}:${deployedTag} to namespace ${env.K8S_NS}"
+        def deployedTag = (env.GIT_TAG?.trim())
+                          ? env.GIT_TAG
+                          : (env.SHORT_SHA?.trim() ? env.SHORT_SHA : (env.TAG?.trim() ?: 'latest'))
+        echo "✅ Deployed docker.io/${env.DOCKER_IMAGE}:${deployedTag}"
       }
     }
     failure {
