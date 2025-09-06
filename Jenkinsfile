@@ -1,5 +1,5 @@
 // =======================
-// Jenkinsfile (Declarative) — profil "RAM light" STABLE
+// Jenkinsfile (Declarative) — profil "RAM light" + TESTS
 // =======================
 pipeline {
 
@@ -36,6 +36,7 @@ spec:
     command: ["cat"]
     tty: true
     workingDir: /home/jenkins/agent
+    securityContext: { runAsUser: 0 }   # pour apt-get (Chromium)
     env:
     - name: NPM_CONFIG_CACHE
       value: /home/jenkins/.npm
@@ -156,6 +157,57 @@ spec:
       }
     }
 
+    // ---------- TESTS FRONTEND ----------
+    stage('Install Chromium (for Karma)') {
+      steps {
+        container('node') {
+          sh '''
+            set -eux
+            if ! command -v chromium >/dev/null 2>&1 && ! command -v chromium-browser >/dev/null 2>&1; then
+              apt-get update
+              DEBIAN_FRONTEND=noninteractive apt-get install -y chromium fonts-liberation
+              apt-get clean
+              rm -rf /var/lib/apt/lists/*
+            fi
+            command -v chromium || command -v chromium-browser
+          '''
+        }
+      }
+    }
+
+    stage('Test Frontend') {
+      steps {
+        retry(2) {
+          timeout(time: 25, unit: 'MINUTES') {
+            container('node') {
+              dir('employee frontend final') {
+                sh '''
+                  set -eux
+                  export NG_CLI_ANALYTICS=false
+                  export CI=true
+                  export NODE_OPTIONS="--max-old-space-size=1536"
+
+                  npm ci --prefer-offline --no-audit --progress=false || \
+                  npm install --prefer-offline --no-audit --progress=false
+
+                  export CHROME_BIN="$(command -v chromium || command -v chromium-browser || true)"
+
+                  npm run test -- --watch=false --browsers=ChromeHeadlessNoSandbox --no-progress --code-coverage
+                '''
+              }
+            }
+          }
+        }
+      }
+      post {
+        always {
+          junit allowEmptyResults: true, testResults: 'employee frontend final/**/junit/**/*.xml'
+          archiveArtifacts artifacts: 'employee frontend final/**/coverage/**/*', allowEmptyArchive: true
+        }
+      }
+    }
+
+    // ---------- BUILD FRONTEND ----------
     stage('Build Frontend') {
       steps {
         retry(2) {
@@ -182,6 +234,39 @@ spec:
       }
     }
 
+    // ---------- TESTS BACKEND ----------
+    stage('Test Backend (Maven)') {
+      steps {
+        retry(2) {
+          timeout(time: 25, unit: 'MINUTES') {
+            container('maven') {
+              dir('emp_backend') {
+                sh '''
+                  set -eux
+                  export MAVEN_OPTS="-Xms256m -Xmx1024m -Djava.awt.headless=true -XX:+UseSerialGC"
+                  MVN_COMMON="-B -Dmaven.repo.local=$MAVEN_CONFIG \
+                    -Dhttp.keepAlive=false -Dmaven.wagon.http.pool=false \
+                    -Dmaven.wagon.http.retryHandler.count=3"
+
+                  if [ -x ./mvnw ]; then
+                    ./mvnw  $MVN_COMMON -DskipTests=false test
+                  else
+                    mvn     $MVN_COMMON -DskipTests=false test
+                  fi
+                '''
+              }
+            }
+          }
+        }
+      }
+      post {
+        always {
+          junit allowEmptyResults: true, testResults: 'emp_backend/**/surefire-reports/*.xml'
+        }
+      }
+    }
+
+    // ---------- BUILD BACKEND ----------
     stage('Build Backend (Maven)') {
       steps {
         retry(2) {
@@ -190,7 +275,7 @@ spec:
               dir('emp_backend') {
                 sh '''
                   set -eux
-                  export MAVEN_OPTS="-Xms256m -Xmx1024m -XX:+UseSerialGC -Djava.awt.headless=true"
+                  export MAVEN_OPTS="-Xms256m -Xmx1024m -Djava.awt.headless=true -XX:+UseSerialGC"
                   MVN_COMMON="-B -Dmaven.repo.local=$MAVEN_CONFIG \
                     -Dhttp.keepAlive=false -Dmaven.wagon.http.pool=false \
                     -Dmaven.wagon.http.retryHandler.count=3"
@@ -208,6 +293,7 @@ spec:
       }
     }
 
+    // ---------- IMAGE ----------
     stage('Build & Push Image (Kaniko)') {
       steps {
         retry(2) {
@@ -252,6 +338,7 @@ spec:
       }
     }
 
+    // ---------- DEPLOY ----------
     stage('Deploy to Kubernetes') {
       steps {
         retry(2) {
@@ -271,6 +358,7 @@ spec:
       }
     }
 
+    // ---------- SMOKE ----------
     stage('Smoke Test (Ingress)') {
       steps {
         retry(2) {
@@ -287,20 +375,18 @@ spec:
     }
   }
 
-post {
-  success {
-    script {
-      // fallback: SHORT_SHA si présent, sinon TAG, sinon "latest"
-      def deployedTag = (env.SHORT_SHA?.trim()) ? env.SHORT_SHA : (env.TAG?.trim() ?: 'latest')
-      echo "✅ Deployed docker.io/${env.DOCKER_IMAGE}:${deployedTag} to namespace ${env.K8S_NS}"
+  post {
+    success {
+      script {
+        def deployedTag = (env.SHORT_SHA?.trim()) ? env.SHORT_SHA : (env.TAG?.trim() ?: 'latest')
+        echo "✅ Deployed docker.io/${env.DOCKER_IMAGE}:${deployedTag} to namespace ${env.K8S_NS}"
+      }
+    }
+    failure {
+      echo "❌ Build failed — check the first failing stage in Console Output"
+    }
+    always {
+      cleanWs()
     }
   }
-  failure {
-    echo "❌ Build failed — check the first failing stage in Console Output"
-  }
-  always {
-    cleanWs()
-  }
-}
-
 }
