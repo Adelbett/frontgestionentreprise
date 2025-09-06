@@ -235,12 +235,27 @@ spec:
           }
         }
       }
-      post {
-        always {
-          junit allowEmptyResults: true, testResults: 'employee frontend final/**/junit/**/*.xml'
-          archiveArtifacts artifacts: 'employee frontend final/**/coverage/**/*', allowEmptyArchive: true
-        }
-      }
+post {
+  always {
+    // On se place dans le dossier du frontend (gère bien l'espace)
+    dir('employee frontend final') {
+      // (optionnel) petit listing pour debug
+      sh '''
+        echo "Workspace: $(pwd)"
+        ls -lah test-results || true
+        head -n 5 test-results/*.xml || true
+      '''
+
+      // Publie les rapports JUnit produits par Karma
+      junit allowEmptyResults: true, testResults: 'test-results/*.xml'
+
+      // Archive la couverture
+      archiveArtifacts artifacts: 'coverage/**', allowEmptyArchive: true
+    }
+  }
+}
+
+
     }
 
     // ---- BACKEND BUILD (Maven) ----
