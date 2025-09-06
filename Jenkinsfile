@@ -127,21 +127,21 @@ spec:
 
   stages {
 
-stage('Checkout') {
-  steps {
-    timeout(time: 5, unit: 'MINUTES') {
-      retry(2) {
-        checkout([$class: 'GitSCM',
-          branches: [[name: '*/main']],
-          userRemoteConfigs: [[url: 'https://github.com/Adelbett/frontgestionentreprise.git', credentialsId: 'token_github']],
-          extensions: [
-            [$class: 'CloneOption', shallow: true, depth: 1, noTags: true, honorRefspec: true]
-          ]
-        ])
+    stage('Checkout') {
+      steps {
+        timeout(time: 5, unit: 'MINUTES') {
+          retry(2) {
+            checkout([$class: 'GitSCM',
+              branches: [[name: '*/main']],
+              userRemoteConfigs: [[url: 'https://github.com/Adelbett/frontgestionentreprise.git', credentialsId: 'token_github']],
+              extensions: [
+                [$class: 'CloneOption', shallow: true, depth: 1, noTags: true, honorRefspec: true]
+              ]
+            ])
+          }
+        }
       }
     }
-  }
-}
 
     stage('Init vars') {
       steps {
@@ -225,7 +225,7 @@ stage('Checkout') {
       }
     }
 
-    // Tests Karma en headless + JUnit + lcov
+    // ---- TESTS FRONTEND (Karma headless + JUnit + lcov archivé) ----
     stage('Test Frontend') {
       steps {
         retry(2) {
@@ -238,27 +238,30 @@ stage('Checkout') {
                   export CI=true
                   export NODE_OPTIONS="--max-old-space-size=1536"
 
-                  # s'assurer que les reporters sont présents
-                  npm i -D karma-junit-reporter karma-coverage >/dev/null 2>&1 || true
+                  # reporters nécessaires
+                  npm i -D karma-junit-reporter karma-coverage
 
-                  # fichier de conf CI qui étend la conf existante pour ajouter les reporters
-                  cat > karma.ci.conf.js <<'EOF'
-                  const base = require('./karma.conf.js');
-                  module.exports = function(config) {
-                    base(config);
-                    const reporters = (config.reporters || ['progress']).slice();
-                    if (!reporters.includes('junit')) reporters.push('junit');
-                    if (!reporters.includes('coverage')) reporters.push('coverage');
+                  # Config Karma pour Jenkins (Chrome headless + JUnit + LCOV)
+                  cat > karma.jenkins.conf.js <<'EOF'
+                  module.exports = function (config) {
                     config.set({
-                      reporters,
+                      singleRun: true,
+                      browsers: ['ChromeHeadlessNoSandbox'],
+                      customLaunchers: {
+                        ChromeHeadlessNoSandbox: {
+                          base: 'ChromeHeadless',
+                          flags: ['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage']
+                        }
+                      },
+                      reporters: ['progress','junit','coverage'],
                       junitReporter: {
-                        outputDir: 'test-results/karma',
-                        outputFile: 'karma-tests.xml',
+                        outputDir: 'test-results',
+                        outputFile: 'karma.xml',
                         useBrowserName: false
                       },
                       coverageReporter: {
                         dir: 'coverage',
-                        reporters: [{ type: 'lcovonly', subdir: '.' }, { type: 'text-summary' }]
+                        reporters: [{ type: 'lcovonly', subdir: '.' }]
                       }
                     });
                   };
@@ -268,7 +271,8 @@ stage('Checkout') {
                   echo "Using CHROME_BIN=$CHROME_BIN"
                   "$CHROME_BIN" --version
 
-                  ./node_modules/.bin/ng test --karma-config=karma.ci.conf.js \
+                  npm run test -- \
+                    --karma-config=karma.jenkins.conf.js \
                     --watch=false \
                     --browsers=ChromeHeadlessNoSandbox \
                     --no-progress \
@@ -285,20 +289,13 @@ stage('Checkout') {
             sh '''
               echo "Workspace: $(pwd)"
               ls -lah test-results || true
-              head -n 5 test-results/*.xml || true
+              ls -lah coverage || true
+              head -n 20 test-results/*.xml || true
             '''
             // Publie les rapports JUnit produits par Karma
-            junit allowEmptyResults: true, testResults: 'test-results/karma/*.xml'
-
-            // Publie la couverture lcov si le plugin est là, sinon archive
-            script {
-              try {
-                publishCoverage adapters: [ lcov(lcovFile: "employee frontend final/coverage/lcov.info") ]
-              } catch (e) {
-                echo "publishCoverage non dispo, on archive la couverture: ${e}"
-                archiveArtifacts artifacts: 'coverage/**', allowEmptyArchive: true
-              }
-            }
+            junit allowEmptyResults: true, testResults: 'test-results/*.xml'
+            // Archive la couverture (pas de step lcov)
+            archiveArtifacts artifacts: 'coverage/**', allowEmptyArchive: true
           }
         }
       }
