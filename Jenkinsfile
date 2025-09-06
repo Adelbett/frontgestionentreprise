@@ -292,7 +292,7 @@ spec:
               ls -lah coverage || true
               head -n 20 test-results/*.xml || true
             '''
-            // Publie les rapports JUnit produits par Karma
+            // Publie JUnit
             junit allowEmptyResults: true, testResults: 'test-results/*.xml'
             // Archive la couverture (pas de step lcov)
             archiveArtifacts artifacts: 'coverage/**', allowEmptyArchive: true
