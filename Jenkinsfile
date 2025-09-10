@@ -72,6 +72,17 @@ spec:
     volumeMounts:
       - { name: workspace-volume, mountPath: /home/jenkins/agent }
 
+  - name: trivy
+    image: aquasec/trivy:latest
+    imagePullPolicy: IfNotPresent
+    command: ["cat"]
+    tty: true
+    workingDir: /home/jenkins/agent
+    env:
+      - { name: TRIVY_DB_REPOSITORY,      value: "public.ecr.aws/aquasecurity/trivy-db" }
+      - { name: TRIVY_JAVA_DB_REPOSITORY, value: "public.ecr.aws/aquasecurity/trivy-java-db" }
+      - { name: TRIVY_TIMEOUT,            value: "10m" }
+
   volumes:
   - name: docker-config
     secret:
@@ -150,14 +161,6 @@ spec:
         }
       }
     }
-    stage('Trivy Image Scan') {
-  steps {
-    sh '''
-      trivy image --exit-code 1 --severity HIGH,CRITICAL myrepo/app:latest
-    '''
-  }
-}
-
 
     stage('Sanity') {
       steps { container('kubectl') { sh 'set -x; whoami || true; pwd; ls -la .; df -h; free -m' } }
@@ -331,6 +334,34 @@ spec:
               '''
             }
           }
+        }
+      }
+    }
+
+    // ---------------- TRIVY (scan après push) ----------------
+    stage('Trivy Scan des images poushees') {
+      when { anyOf { branch 'main'; buildingTag() } }
+      steps {
+        container('trivy') {
+          sh '''
+            set -euxo pipefail
+            DEPLOY_TAG="${SHORT_SHA:-$TAG}"
+            IMG_BE="docker.io/${DOCKER_IMAGE}:${DEPLOY_TAG}"
+            IMG_FE="docker.io/${DOCKER_IMAGE_FE}:${DEPLOY_TAG}"
+
+            trivy --version
+
+            # si vos repos Docker Hub sont privés, décommentez:
+            # trivy registry login -u "$DH_USER" -p "$DH_PASS" docker.io
+
+            echo ">> Trivy scan BE: $IMG_BE"
+            trivy image --no-progress --ignore-unfixed \
+              --severity HIGH,CRITICAL --exit-code 1 "$IMG_BE"
+
+            echo ">> Trivy scan FE: $IMG_FE"
+            trivy image --no-progress --ignore-unfixed \
+              --severity HIGH,CRITICAL --exit-code 1 "$IMG_FE"
+          '''
         }
       }
     }
