@@ -150,6 +150,14 @@ spec:
         }
       }
     }
+    stage('Trivy Image Scan') {
+  steps {
+    sh '''
+      trivy image --exit-code 1 --severity HIGH,CRITICAL myrepo/app:latest
+    '''
+  }
+}
+
 
     stage('Sanity') {
       steps { container('kubectl') { sh 'set -x; whoami || true; pwd; ls -la .; df -h; free -m' } }
