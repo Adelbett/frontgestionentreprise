@@ -1,6 +1,7 @@
 // =======================
 // Jenkinsfile (Declarative) — CI/CD: main->dev (auto) | tag->prod (approval)
 // Backend tests DISABLED (pour débloquer la CI)
+// + TRIVY image scan (non bloquant) — artefacts JSON & SARIF
 // =======================
 pipeline {
 
@@ -57,7 +58,7 @@ spec:
     - { name: MAVEN_CONFIG, value: /home/jenkins/.m2 }
     resources:
       requests: { cpu: "300m", memory: "768Mi" }
-    limits:   { cpu: "1",    memory: "1536Mi" }
+      limits:   { cpu: "1",    memory: "1536Mi" }
     volumeMounts:
     - { name: workspace-volume, mountPath: /home/jenkins/agent }
     - { name: m2-cache,         mountPath: /home/jenkins/.m2 }
@@ -88,6 +89,23 @@ spec:
     volumeMounts:
     - { name: workspace-volume, mountPath: /home/jenkins/agent }
 
+  # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+  # >>> TRIVY (ajouté) — utilisé par le stage "Security Scan (Trivy)"
+  - name: trivy
+    image: mirror.gcr.io/aquasec/trivy:0.65.0
+    imagePullPolicy: IfNotPresent
+    command: ["sleep","99d"]
+    tty: true
+    workingDir: /home/jenkins/agent
+    env:
+    - name: TRIVY_CACHE_DIR
+      value: /home/jenkins/.trivy-cache
+    volumeMounts:
+    - { name: workspace-volume, mountPath: /home/jenkins/agent }
+    - { name: trivy-cache,      mountPath: /home/jenkins/.trivy-cache }
+    - { name: docker-config,    mountPath: /root/.docker } # auth registry pour pull l'image à scanner
+  # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
   volumes:
   - name: docker-config
     secret:
@@ -102,6 +120,10 @@ spec:
     emptyDir: {}
 
   - name: m2-cache
+    emptyDir: {}
+
+  # >>> volume cache TRIVY (ajouté)
+  - name: trivy-cache
     emptyDir: {}
 """
       defaultContainer 'kubectl'
@@ -317,9 +339,6 @@ spec:
       }
     }
 
-    // ---- (SUPPRIMÉ) Test Backend (Maven)
-    // Étape supprimée volontairement pour éviter tout accès MySQL pendant la CI.
-
     // ---- IMAGE DOCKER (Kaniko) ----
     stage('Build & Push Image (Kaniko)') {
       when { anyOf { branch 'main'; buildingTag() } }
@@ -363,6 +382,52 @@ spec:
               '''
             }
           }
+        }
+      }
+    }
+
+    // ---- TRIVY IMAGE SCAN (non bloquant) — artefacts JSON & SARIF ----
+    stage('Security Scan (Trivy)') {
+      when { anyOf { branch 'main'; buildingTag() } }
+      steps {
+        container('trivy') {
+          sh '''
+            set -eux
+            # Choisir le même tag que le déploiement
+            if [ -n "${GIT_TAG:-}" ]; then
+              IMAGE_TAG="$GIT_TAG"
+            elif [ -n "${SHORT_SHA:-}" ]; then
+              IMAGE_TAG="$SHORT_SHA"
+            else
+              IMAGE_TAG="$TAG"
+            fi
+
+            IMAGE="docker.io/${DOCKER_IMAGE}:${IMAGE_TAG}"
+            echo ">> Trivy scanning $IMAGE"
+
+            trivy --version
+
+            # JSON (lisible par machines)
+            trivy image \
+              --exit-code 0 \
+              --severity HIGH,CRITICAL \
+              --format json \
+              --output trivy-image-report.json \
+              "$IMAGE" || true
+
+            # SARIF (pour GitHub/SAST viewers)
+            trivy image \
+              --exit-code 0 \
+              --severity HIGH,CRITICAL \
+              --format sarif \
+              --output trivy-image-report.sarif \
+              "$IMAGE" || true
+          '''
+        }
+      }
+      post {
+        always {
+          archiveArtifacts artifacts: 'trivy-image-report.*', allowEmptyArchive: true
         }
       }
     }
