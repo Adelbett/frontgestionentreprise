@@ -1,6 +1,6 @@
 // =======================
 // Jenkinsfile (Declarative) — Frontend + Backend
-// Branch main -> DEV (auto) | Tag -> PROD (approval)
+// main -> DEV (auto) | Tag -> PROD (approval)
 // =======================
 pipeline {
 
@@ -108,22 +108,15 @@ spec:
   triggers { githubPush() }
 
   environment {
-    // ---- Images
     DOCKER_IMAGE        = 'adelbettaieb/gestionentreprise'              // backend
     DOCKER_IMAGE_FE     = 'adelbettaieb/gestionentreprise-frontend'     // frontend
-
-    // ---- K8s (DEV)
     K8S_NS              = 'jenkins'
-    // Backend
     BACKEND_DEPLOYMENT  = 'gestionentreprise'
     BACKEND_CONTAINER   = 'app'
     INGRESS_HOST        = 'app.local'
-    // Frontend
     FRONTEND_DEPLOYMENT = 'frontend'
     FRONTEND_CONTAINER  = 'frontend'
     FRONTEND_INGRESS_HOST = 'front.local'
-
-    // ---- K8s (PROD)
     PROD_NS             = 'prod'
     PROD_INGRESS_HOST   = 'app.prod.local'
     PROD_FRONTEND_HOST  = 'front.prod.local'
@@ -154,7 +147,6 @@ spec:
           env.SHORT_SHA   = (env.GIT_COMMIT ? env.GIT_COMMIT.take(8) : '')
           env.TAG         = (safeBranch == 'main') ? 'latest' : "${safeBranch}-${env.BUILD_NUMBER}"
           env.GIT_TAG     = sh(script: 'git describe --tags --exact-match 2>/dev/null || true', returnStdout: true).trim()
-
           echo "Backend image  => docker.io/${env.DOCKER_IMAGE}:${env.TAG}"
           echo "Frontend image => docker.io/${env.DOCKER_IMAGE_FE}:${env.TAG}"
           echo "SHORT_SHA=${env.SHORT_SHA}  GIT_TAG=${env.GIT_TAG}"
@@ -189,7 +181,6 @@ spec:
                   export NG_BUILD_MAX_WORKERS=1
                   npm config set fund false
                   npm ci --prefer-offline --no-audit --progress=false || npm install --prefer-offline --no-audit --progress=false
-                  # Build local (utile pour valider et pour les tests)
                   npm run build -- --configuration=production --no-progress --output-path=dist/frontend
                 '''
               }
@@ -338,23 +329,32 @@ spec:
       }
     }
 
-    // ---------------- TRIVY (scan après push) ----------------
+    // ---------------- TRIVY (non-bloquant) ----------------
     stage('Trivy report (non-bloquant)') {
-  steps {
-    sh '''
-      trivy image \
-        --scanners vuln \
-        --vuln-type os,library \
-        --severity HIGH,CRITICAL \
-        --ignore-unfixed \
-        --exit-code 0 \
-        --format json -o trivy-report.json \
-        docker.io/adelbettaieb/gestionentreprise:${TAG:-latest}
-    '''
-    archiveArtifacts artifacts: 'trivy-report.json', allowEmptyArchive: true
-  }
-}
+      steps {
+        catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+          container('trivy') {
+            sh '''
+              set -eux
+              # Scan vuln OS+libs, ne casse jamais le build:
+              trivy image \
+                --scanners vuln \
+                --vuln-type os,library \
+                --severity HIGH,CRITICAL \
+                --ignore-unfixed \
+                --timeout "${TRIVY_TIMEOUT:-10m}" \
+                --exit-code 0 \
+                --format json -o trivy-report.json \
+                docker.io/${DOCKER_IMAGE}:${TAG:-latest} || true
 
+              # Petit résumé lisible (non bloquant)
+              trivy image -q docker.io/${DOCKER_IMAGE}:${TAG:-latest} | grep -E "Total:" || true
+            '''
+          }
+          archiveArtifacts artifacts: 'trivy-report.json', allowEmptyArchive: true
+        }
+      }
+    }
 
     // ---------------- DEPLOYS DEV ----------------
     stage('Deploy to Kubernetes (DEV)') {
@@ -364,7 +364,6 @@ spec:
           container('kubectl') {
             sh '''
               set -eux
-              # Appliquer vos manifests (assurez-vous d’avoir k8s/ avec backend + frontend)
               test -d "$WORKSPACE/k8s" && kubectl -n "$K8S_NS" apply -f "$WORKSPACE/k8s"
 
               DEPLOY_TAG="${SHORT_SHA:-$TAG}"
@@ -389,12 +388,10 @@ spec:
           container('kubectl') {
             sh '''
               set -eux
-              # Backend ingress
               kubectl -n "$K8S_NS" run smoke-be --rm -i --restart=Never --image=curlimages/curl -- \
                 -sSI -H "Host: $INGRESS_HOST" \
                 http://ingress-nginx-controller.ingress-nginx.svc.cluster.local/ | head -n1
 
-              # Frontend ingress
               kubectl -n "$K8S_NS" run smoke-fe --rm -i --restart=Never --image=curlimages/curl -- \
                 -sSI -H "Host: $FRONTEND_INGRESS_HOST" \
                 http://ingress-nginx-controller.ingress-nginx.svc.cluster.local/ | head -n1
@@ -441,12 +438,10 @@ spec:
           container('kubectl') {
             sh '''
               set -eux
-              # Backend
               kubectl -n "$PROD_NS" run smoke-be --rm -i --restart=Never --image=curlimages/curl -- \
                 -sSI -H "Host: $PROD_INGRESS_HOST" \
                 http://ingress-nginx-controller.ingress-nginx.svc.cluster.local/ | head -n1
 
-              # Frontend
               kubectl -n "$PROD_NS" run smoke-fe --rm -i --restart=Never --image=curlimages/curl -- \
                 -sSI -H "Host: $PROD_FRONTEND_HOST" \
                 http://ingress-nginx-controller.ingress-nginx.svc.cluster.local/ | head -n1
