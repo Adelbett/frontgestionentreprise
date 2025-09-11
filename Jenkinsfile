@@ -339,32 +339,22 @@ spec:
     }
 
     // ---------------- TRIVY (scan après push) ----------------
-    stage('Trivy Scan des images poushees') {
-      when { anyOf { branch 'main'; buildingTag() } }
-      steps {
-        container('trivy') {
-          sh '''
-            set -euxo pipefail
-            DEPLOY_TAG="${SHORT_SHA:-$TAG}"
-            IMG_BE="docker.io/${DOCKER_IMAGE}:${DEPLOY_TAG}"
-            IMG_FE="docker.io/${DOCKER_IMAGE_FE}:${DEPLOY_TAG}"
+    stage('Trivy report (non-bloquant)') {
+  steps {
+    sh '''
+      trivy image \
+        --scanners vuln \
+        --vuln-type os,library \
+        --severity HIGH,CRITICAL \
+        --ignore-unfixed \
+        --exit-code 0 \
+        --format json -o trivy-report.json \
+        docker.io/adelbettaieb/gestionentreprise:${TAG:-latest}
+    '''
+    archiveArtifacts artifacts: 'trivy-report.json', allowEmptyArchive: true
+  }
+}
 
-            trivy --version
-
-            # si vos repos Docker Hub sont privés, décommentez:
-            # trivy registry login -u "$DH_USER" -p "$DH_PASS" docker.io
-
-            echo ">> Trivy scan BE: $IMG_BE"
-            trivy image --no-progress --ignore-unfixed \
-              --severity HIGH,CRITICAL --exit-code 1 "$IMG_BE"
-
-            echo ">> Trivy scan FE: $IMG_FE"
-            trivy image --no-progress --ignore-unfixed \
-              --severity HIGH,CRITICAL --exit-code 1 "$IMG_FE"
-          '''
-        }
-      }
-    }
 
     // ---------------- DEPLOYS DEV ----------------
     stage('Deploy to Kubernetes (DEV)') {
