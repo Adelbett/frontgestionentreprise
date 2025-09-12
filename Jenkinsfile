@@ -1,7 +1,6 @@
 // =======================
 // Jenkinsfile (Declarative) — CI/CD: main->dev (auto) | tag->prod (approval)
-// Backend tests DISABLED (pour débloquer la CI)
-// + TRIVY image scan (non bloquant) — artefacts JSON & SARIF
+// + Trivy (non-bloquant) + Email d'alerte si >=1 HIGH/CRITICAL
 // =======================
 pipeline {
 
@@ -89,8 +88,7 @@ spec:
     volumeMounts:
     - { name: workspace-volume, mountPath: /home/jenkins/agent }
 
-  # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-  # >>> TRIVY (ajouté) — utilisé par le stage "Security Scan (Trivy)"
+  # --- Nouveau : conteneur Trivy ---
   - name: trivy
     image: mirror.gcr.io/aquasec/trivy:0.65.0
     imagePullPolicy: IfNotPresent
@@ -103,8 +101,7 @@ spec:
     volumeMounts:
     - { name: workspace-volume, mountPath: /home/jenkins/agent }
     - { name: trivy-cache,      mountPath: /home/jenkins/.trivy-cache }
-    - { name: docker-config,    mountPath: /root/.docker } # auth registry pour pull l'image à scanner
-  # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+    - { name: docker-config,    mountPath: /root/.docker }  # auth registry si besoin
 
   volumes:
   - name: docker-config
@@ -122,7 +119,7 @@ spec:
   - name: m2-cache
     emptyDir: {}
 
-  # >>> volume cache TRIVY (ajouté)
+  # --- Nouveau : cache Trivy ---
   - name: trivy-cache
     emptyDir: {}
 """
@@ -146,6 +143,11 @@ spec:
 
     PROD_NS            = 'prod'
     PROD_INGRESS_HOST  = 'app.prod.local'
+
+    // --- Email + seuils Trivy (alerte si >=1) ---
+    ALERT_EMAILS   = 'adelbettaieb97@gmail.com'
+    TRIVY_MAX_CRIT = '0'
+    TRIVY_MAX_HIGH = '0'
   }
 
   stages {
@@ -386,48 +388,45 @@ spec:
       }
     }
 
-    // ---- TRIVY IMAGE SCAN (non bloquant) — artefacts JSON & SARIF ----
-    stage('Security Scan (Trivy)') {
-      when { anyOf { branch 'main'; buildingTag() } }
+    // ---- TRIVY (non-bloquant) : scan de l'image poussée ----
+    stage('Trivy Scan (non-blocking)') {
+      when { anyOf { branch 'main'; buildingTag() } } // l'image existe dans le registry
       steps {
         container('trivy') {
           sh '''
             set -eux
-            # Choisir le même tag que le déploiement
-            if [ -n "${GIT_TAG:-}" ]; then
-              IMAGE_TAG="$GIT_TAG"
-            elif [ -n "${SHORT_SHA:-}" ]; then
-              IMAGE_TAG="$SHORT_SHA"
-            else
-              IMAGE_TAG="$TAG"
-            fi
+            # jq pour parser le JSON
+            command -v jq >/dev/null 2>&1 || (apk add --no-cache jq >/dev/null)
 
-            IMAGE="docker.io/${DOCKER_IMAGE}:${IMAGE_TAG}"
-            echo ">> Trivy scanning $IMAGE"
+            IMG="docker.io/${DOCKER_IMAGE}:${TAG}"
 
-            trivy --version
-
-            # JSON (lisible par machines)
-            trivy image \
+            # 1) Scan image -> JSON + SARIF (non bloquant)
+            trivy image --skip-version-check --timeout 15m \
+              --scanners vuln,secret \
               --exit-code 0 \
               --severity HIGH,CRITICAL \
-              --format json \
-              --output trivy-image-report.json \
-              "$IMAGE" || true
+              --format json  --output trivy-image-report.json "$IMG" || true
 
-            # SARIF (pour GitHub/SAST viewers)
-            trivy image \
+            trivy image --skip-version-check --timeout 15m \
+              --scanners vuln,secret \
               --exit-code 0 \
               --severity HIGH,CRITICAL \
-              --format sarif \
-              --output trivy-image-report.sarif \
-              "$IMAGE" || true
+              --format sarif --output trivy-image-report.sarif "$IMG" || true
+
+            # 2) Extraire les compteurs pour l'alerte
+            CRIT=$(jq '[ .Results[].Vulnerabilities[]? | select(.Severity=="CRITICAL") ] | length' trivy-image-report.json)
+            HIGH=$(jq '[ .Results[].Vulnerabilities[]? | select(.Severity=="HIGH") ] | length' trivy-image-report.json)
+
+            echo "CRITICAL=$CRIT" >  trivy-counts.env
+            echo "HIGH=$HIGH"    >> trivy-counts.env
+
+            echo "Trivy counts: CRITICAL=$CRIT HIGH=$HIGH"
           '''
         }
       }
       post {
         always {
-          archiveArtifacts artifacts: 'trivy-image-report.*', allowEmptyArchive: true
+          archiveArtifacts artifacts: 'trivy-image-report.* , trivy-counts.env', allowEmptyArchive: true
         }
       }
     }
@@ -508,6 +507,48 @@ spec:
                 -sSI -H "Host: $PROD_INGRESS_HOST" \
                 http://ingress-nginx-controller.ingress-nginx.svc.cluster.local/ | head -n1
             '''
+          }
+        }
+      }
+    }
+
+    // ---- Email d'alerte si seuil dépassé (>=1 HIGH/CRITICAL) ----
+    stage('Notify by Email (Trivy)') {
+      when { anyOf { branch 'main'; buildingTag() } } // on a produit les rapports
+      steps {
+        script {
+          def countsFile = 'trivy-counts.env'
+          if (fileExists(countsFile)) {
+            def counts = readFile(countsFile).trim().split('\n') as List
+            def map = counts.collectEntries { it.split('=') as List }
+            int crit = (map['CRITICAL'] ?: '0') as Integer
+            int high = (map['HIGH'] ?: '0') as Integer
+            int maxC = env.TRIVY_MAX_CRIT as Integer
+            int maxH = env.TRIVY_MAX_HIGH as Integer
+
+            if (crit > maxC || high > maxH) {
+              def subject = "ALERTE Trivy: ${env.JOB_NAME} #${env.BUILD_NUMBER} (CRIT:${crit} HIGH:${high})"
+              def body = """
+Bonjour,
+
+Le scan Trivy a détecté des vulnérabilités au-dessus du seuil:
+  - CRITICAL: ${crit} (seuil ${maxC})
+  - HIGH:     ${high} (seuil ${maxH})
+
+Rapports:
+  JSON : ${env.BUILD_URL}artifact/trivy-image-report.json
+  SARIF: ${env.BUILD_URL}artifact/trivy-image-report.sarif
+
+Build: ${env.BUILD_URL}
+
+-- Jenkins
+"""
+              mail to: env.ALERT_EMAILS, subject: subject, body: body
+            } else {
+              echo "Seuils non dépassés, pas d’email (CRIT=${crit}/${maxC}, HIGH=${high}/${maxH})."
+            }
+          } else {
+            echo "Pas de fichier trivy-counts.env — skip email."
           }
         }
       }
